@@ -411,3 +411,85 @@ Stage Summary:
 - All fetches go through apiUrl() (APK-compatible)
 - Backend scraping + Playwright extraction + Prisma persistence all working
 - Maquette Material 3 olive/emerald preserved throughout
+
+---
+Task ID: 11-native-player-refactor
+Agent: full-stack-developer
+Task: Refactor SecureBrowserModal.tsx so the reading page uses French-Stream's NATIVE player interface (via the /api/proxy iframe) instead of guymaTV's custom <video> + hls.js + Playwright /api/extract pipeline. French-Stream becomes the server that provides the film AND its own reading interface; guymaTV keeps the chrome around the video (top bar, hero, info, episodes, comments).
+
+Work Log:
+- Read /home/z/my-project/worklog.md and the full original SecureBrowserModal.tsx (1632 lines) to map every state variable, useEffect, handler, and JSX block that needed to change.
+- Wrote a new version of /home/z/my-project/src/components/guyma/SecureBrowserModal.tsx (1174 lines) with the following changes:
+  * REMOVED imports: `StreamServer` (no longer needed), the `let HlsModule` lazy loader, and the `isDirectVideo()` helper.
+  * REMOVED state: `servers`, `serversLoading`, `switchingServer`, `selectedServerIndex`, `currentVideoUrl`, `directVideo`, `isHlsStream`, `isPlaying`, `currentTime`, `duration`, `volume`, `isMuted`.
+  * REMOVED the `useEffect` that fetched `/api/extract` (Playwright extraction) and the `buildProxyFallback` callback.
+  * REMOVED the `useEffect` that attached hls.js to a `<video>` element for .m3u8 streams.
+  * REMOVED the native video control handlers: `togglePlay`, `skipBy`, `handleSeek`, `handleVolumeChange`, `toggleMute`, `formatSeconds`, `handleServerSwitch`, `serverLabel`, and the `timelinePct` computation.
+  * REMOVED the entire "Streaming Controls Bar" JSX block (server selector tabs Uqloading/ViDZY/etc + skeleton loaders) and the native `<video>` element + custom player controls overlay (timeline scrubber, play/pause, ±10s, volume slider, mute, fullscreen chip).
+  * REMOVED keyboard shortcuts for Space/Enter (play), ArrowUp/ArrowDown (volume), ArrowLeft/ArrowRight (±10s), M (mute). Kept only Escape (close, when not in fullscreen) and F (toggle fullscreen on the iframe container).
+  * REMOVED the "Lecture" button from the hero action row (the iframe IS the player now).
+  * REMOVED the "Télécharger" + favorite buttons from the top action bar (kept them only in the hero). The top bar now has: back, refresh, uBlock badge, uBlock trigger, fullscreen, close.
+  * KEPT: `iframeKey`, `isFullscreen`, `showUBlockModal`, `blockedAdsOnPage`, `seriesStructure`, `seriesLoading`, `selectedSeason`, `selectedEpisode`, `comments`, `commentsLoading`, `averageRating`, `newCommentName`, `newCommentRating`, `hoverRating`, `newCommentContent`, `submittingComment`, `replyingTo`. Kept the `/api/series-structure` fetch, the `/api/comments` fetch + refresh pattern, the series episodes section, the comments section, the info section, the uBlock protection banner, and the UBlockModal integration.
+  * ADDED: `iframeLoading` (boolean, true until iframe onLoad fires). Renamed the loading copy from "Extraction des lecteurs en cours…" to "Chargement du lecteur French-Stream…".
+  * ADDED: `proxyUrl` memoized from `item.id` + optional `selectedEpisode` (films → `/api/proxy?page=ID`; series with episode → `/api/proxy?page=ID&season=X&episode=Y`). All URLs wrapped in `apiUrl()`.
+  * ADDED: an `iframeLoading` reset effect that flips the flag back to true whenever `proxyUrl` or `iframeKey` changes (so every reload shows the loader until onLoad fires).
+  * CHANGED: the video player area is now ALWAYS an `<iframe>` (no more conditional direct-video vs proxy fallback). Container has `height: 60vh`, `backgroundColor: #0f1412`, `minHeight: 320px`, and `w-full h-full` iframe with the exact sandbox/allow attributes from the spec (`allow-scripts allow-same-origin allow-forms allow-presentation allow-popups` / `autoplay; fullscreen; encrypted-media; picture-in-picture`).
+  * CHANGED: `handleRefresh` now bumps `iframeKey` and re-flips `iframeLoading` (no more `videoRef` src reload dance).
+  * CHANGED: `handleSelectEpisode` now sets the episode and bumps `iframeKey` so the iframe remounts with the new proxy URL.
+  * CHANGED: `toggleFullscreen` now requests fullscreen on `containerRef` (the iframe container) — same as before but no longer competing with a `<video>` element.
+  * ADDED overlay decorations around the iframe: uBlock shield watermark (top-left), episode/quality badge (top-right), native-player hint chip (bottom-left "Interface native French-Stream"), and a fullscreen overlay button (bottom-right).
+  * ADDED `sticky top-0 z-40` to the top action bar so it stays visible when the user scrolls past the hero.
+  * PRESERVED the design constraints exactly: Material 3 olive/emerald theme (#0f1412 / #ccff80 / #4edea3), Material Symbols Outlined icons, the `.font-headline-*` / `.text-body-*` typography utilities, `bg-surface-container*` / `text-on-surface*` color classes, `apiUrl()` for every fetch, and the `"use client"` directive at the top. No Lucide, no shadcn/ui.
+
+Stage Summary:
+- artifacts produced:
+  * /home/z/my-project/src/components/guyma/SecureBrowserModal.tsx (rewritten, 1174 lines, down from 1632 — net ~458 lines removed)
+  * /home/z/my-project/worklog.md (this entry appended)
+- The reading page is now French-Stream's native player interface embedded via /api/proxy in a prominent iframe. guymaTV manages everything AROUND the video (header bar, hero, info, episode picker, comments, uBlock protection) but no longer ships a custom video element, hls.js, or the Playwright /api/extract pipeline.
+
+---
+Task ID: 12-native-french-stream-player
+Agent: main (Z.ai Code)
+Task: Make French-Stream's native player the ONLY video reader. guymaTV manages everything else. Support both mirror domains (.net + .one).
+
+Work Log:
+- Analyzed french-stream.one via page_reader — confirmed it's an exact mirror of french-stream.net (same DLE database, same newsids, canonical URL points to .net)
+- Updated src/lib/scraper.ts:
+  * Added SOURCE_DOMAINS = ["https://french-stream.net", "https://french-stream.one"]
+  * Updated fetchPage() to try each mirror domain in order until one responds
+  * BASE_URL now references SOURCE_DOMAINS[0] (canonical)
+- Updated src/app/api/proxy/route.ts:
+  * Added multi-domain fallback: tries french-stream.net first, then french-stream.one
+  * Updated rewriteUrl() to accept sourceDomain parameter (uses the domain that actually responded)
+  * Updated <base> tag injection to use the resolved usedDomain
+  * Preserves French-Stream's native player interface: #main-player, .player-option (server tabs), .iframe-container all kept intact
+  * Still strips all ads, popups, trackers, adult content (BLOCKED_DOMAINS + neutralizer JS + CSS)
+- Created src/lib/streaming-servers.ts:
+  * StreamingServer interface (id, name, domain, mirrors, badge, icon, description, enabled, color, categories)
+  * STREAMING_SERVERS registry with French-Stream as first entry
+  * getServer(id) and getEnabledServers() helpers
+  * Architecture ready for future site integration (Wiflix, Empire Streaming, etc.)
+- Launched subagent (Task 11-native-player-refactor) to refactor SecureBrowserModal.tsx:
+  * REMOVED: custom <video> element, hls.js integration, /api/extract fetch, server selector tabs (Uqload/ViDZY), custom player controls (play/pause/timeline/volume/skip), video-related keyboard shortcuts
+  * KEPT: iframe (now PRIMARY and ONLY video display), hero section, info section, series episodes, comments/reviews, uBlock badge, fullscreen on container
+  * ADDED: iframeLoading state, proxyUrl memo (films → /api/proxy?page=ID; series w/ episode → /api/proxy?page=ID&season=X&episode=Y), "Interface native French-Stream" hint chip
+  * Loading message changed from "Extraction des lecteurs…" to "Chargement du lecteur French-Stream…"
+  * File size: 1633 → 1174 lines (net ~460 lines removed)
+- Verified end-to-end with Agent Browser:
+  * Film modal (La Bataille de Gaulle): iframe loads /api/proxy?page=15128265, hasVideo=false, hasNativeHint=true, hasComments=true, no Extraction reference
+  * Series modal (MobLand - Saison 2): iframe loads /api/proxy?page=15138279, hasEpisode=true, hasSaison=true, hasNativeHint=true, hasComments=true
+  * Proxy HTML preserves French-Stream's native player: main-player=True, player-option=True (server tabs intact), neutralizer injected, ad blocker injected, base tag=https://french-stream.net/
+  * No /api/extract calls in the modal (confirmed via grep)
+  * No <video> element (confirmed via grep)
+  * No hls.js references (confirmed via grep)
+  * Proxy response time: ~500-700ms (10x faster than the old Playwright extraction approach)
+  * No console errors, no runtime errors
+
+Stage Summary:
+- ARCHITECTURAL SHIFT COMPLETE: guymaTV is now an AGGREGATOR, not a player.
+  * guymaTV manages: catalog, search, filters, favorites, downloads, comments, info, episode list (navigation aid), ad filtering proxy
+  * French-Stream manages: the actual video reading with its NATIVE interface (server tabs, quality selector, episode list, player controls — all inside our filtered iframe)
+- Multi-domain support: french-stream.net (primary) + french-stream.one (mirror fallback) — automatic failover
+- Streaming server abstraction created (src/lib/streaming-servers.ts) — ready for future site integration (Wiflix, Empire Streaming, CPasMieux, Anime-Sama, StreamComplet)
+- The proxy is now the ONLY video display method — no more custom video player, no more Playwright extraction, no more hls.js
+- French-Stream's native player loads inside our filtered iframe with ALL ads/popups/trackers stripped

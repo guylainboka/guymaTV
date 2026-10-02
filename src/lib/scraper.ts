@@ -1,11 +1,15 @@
 /**
  * guymaTV - French Stream Scraper
  *
- * Scrapes https://french-stream.net to extract:
+ * Scrapes french-stream.net (and its mirror french-stream.one) to extract:
  *  - Catalog (films & series cards)
  *  - Movie/Series details
  *  - Category listings
  *  - Search results
+ *
+ * The source site is a "streaming server" — guymaTV aggregates it (and future
+ * other servers) but delegates the actual video playback to the source site's
+ * own player interface (loaded via our filtered proxy iframe).
  *
  * All HTML parsing uses cheerio. No IA, no mock data - real scraping.
  */
@@ -18,7 +22,20 @@ import type {
   StreamServer,
 } from "@/lib/types";
 
-const BASE_URL = "https://french-stream.net";
+/**
+ * The source site is available on multiple mirror domains. We try them in
+ * order until one responds. The canonical domain is french-stream.net but
+ * french-stream.one is an exact mirror (same DLE database, same newsids).
+ *
+ * Adding a new mirror is as simple as appending to this array.
+ */
+export const SOURCE_DOMAINS = [
+  "https://french-stream.net",
+  "https://french-stream.one",
+];
+
+// Primary domain (used for canonical URLs, referer, etc.)
+const BASE_URL = SOURCE_DOMAINS[0];
 
 // In-memory cache (5 minutes) to reduce load on source site
 interface CacheEntry<T> {
@@ -43,26 +60,51 @@ function setCached<T>(key: string, data: T): void {
 }
 
 /**
- * Fetch a page from french-stream.net with proper headers.
+ * Fetch a page from the source site, trying each mirror domain in order.
+ * If the path is already an absolute URL, use it directly.
  */
 async function fetchPage(path: string): Promise<string> {
-  const url = path.startsWith("http") ? path : `${BASE_URL}${path}`;
-  const res = await fetch(url, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-      "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
-      Accept:
-        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-      Referer: BASE_URL,
-    },
-    // Revalidate every 10 minutes at the Next.js level too
-    next: { revalidate: 600 },
-  });
-  if (!res.ok) {
-    throw new Error(`Failed to fetch ${url}: ${res.status}`);
+  // If absolute URL, fetch directly
+  if (path.startsWith("http")) {
+    const res = await fetch(path, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+        "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+        Accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        Referer: BASE_URL,
+      },
+      next: { revalidate: 600 },
+    });
+    if (!res.ok) throw new Error(`Failed to fetch ${path}: ${res.status}`);
+    return res.text();
   }
-  return res.text();
+
+  // Try each mirror domain until one succeeds
+  let lastErr: Error | null = null;
+  for (const domain of SOURCE_DOMAINS) {
+    try {
+      const url = `${domain}${path}`;
+      const res = await fetch(url, {
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+          "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+          Accept:
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+          Referer: domain,
+        },
+        next: { revalidate: 600 },
+      });
+      if (res.ok) return res.text();
+      lastErr = new Error(`${domain} returned ${res.status}`);
+    } catch (err) {
+      lastErr = err as Error;
+      // Try next domain
+    }
+  }
+  throw lastErr || new Error("All mirror domains failed");
 }
 
 export interface CatalogOptions {

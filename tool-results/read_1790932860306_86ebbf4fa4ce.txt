@@ -1,0 +1,1633 @@
+     1→"use client";
+     2→
+     3→import React, { useState, useRef, useEffect, useCallback } from "react";
+     4→import { StreamItem, StreamServer } from "@/lib/types";
+     5→import { uBlockEngineInstance } from "@/lib/uBlockEngine";
+     6→import { apiUrl } from "@/lib/api-client";
+     7→import { UBlockModal } from "./UBlockModal";
+     8→
+     9→// hls.js is loaded dynamically only when we need to play a .m3u8 stream.
+    10→// Native HLS is supported on Safari/iOS, so we only load hls.js for other browsers.
+    11→let HlsModule: typeof import("hls.js").default | null = null;
+    12→
+    13→// ----------------------------------------------------------------------------
+    14→// Series structure types (mirror of src/lib/scraper.ts SeriesStructure).
+    15→// Defined locally here to avoid importing the server-only scraper module on
+    16→// the client bundle.
+    17→// ----------------------------------------------------------------------------
+    18→interface SeriesEpisode {
+    19→  id: string;
+    20→  episodeNumber: number;
+    21→  seasonNumber: number;
+    22→  title: string;
+    23→  duration?: string;
+    24→  videoUrl: string;
+    25→  synopsis?: string;
+    26→  language: "VF" | "VOSTFR";
+    27→}
+    28→
+    29→interface SeriesSeason {
+    30→  seasonNumber: number;
+    31→  title: string;
+    32→  episodesCount: number;
+    33→  posterUrl?: string;
+    34→}
+    35→
+    36→interface SeriesStructure {
+    37→  newsid: string;
+    38→  title: string;
+    39→  seasons: SeriesSeason[];
+    40→  episodes: SeriesEpisode[];
+    41→  currentSeason: number;
+    42→}
+    43→
+    44→// ----------------------------------------------------------------------------
+    45→// Comments API types (mirror of /api/comments route.ts CommentDTO).
+    46→// ----------------------------------------------------------------------------
+    47→interface CommentDTO {
+    48→  id: string;
+    49→  streamItemId: string;
+    50→  userName: string;
+    51→  rating: number;
+    52→  content: string;
+    53→  parentId: string | null;
+    54→  createdAt: string;
+    55→  replies?: CommentDTO[];
+    56→}
+    57→
+    58→interface SecureBrowserModalProps {
+    59→  item: StreamItem;
+    60→  onClose: () => void;
+    61→  onStartDownload: (item: StreamItem) => void;
+    62→  isFavorite: boolean;
+    63→  onToggleFavorite: (id: string) => void;
+    64→  onSelectRelatedItem?: (item: StreamItem) => void;
+    65→}
+    66→
+    67→/**
+    68→ * Returns true when `url` is a direct video file we can hand to a native
+    69→ * `<video>` element (.mp4 / .m3u8 / .webm, or any absolute http(s) URL that
+    70→ * isn't our own /api/proxy fallback). Returns false for the proxy URL.
+    71→ */
+    72→function isDirectVideo(url: string): boolean {
+    73→  if (!url) return false;
+    74→  if (url.startsWith("/api/proxy")) return false;
+    75→  if (/^https?:\/\//i.test(url)) return true;
+    76→  return /\.(mp4|m3u8|webm)(\?|$)/i.test(url);
+    77→}
+    78→
+    79→// ----------------------------------------------------------------------------
+    80→// Star rating display (read-only)
+    81→// ----------------------------------------------------------------------------
+    82→const StarRow: React.FC<{ rating: number; size?: number }> = ({
+    83→  rating,
+    84→  size = 12,
+    85→}) => (
+    86→  <div className="flex items-center gap-0.5">
+    87→    {[1, 2, 3, 4, 5].map((i) => (
+    88→      <span
+    89→        key={i}
+    90→        className="material-symbols-outlined text-secondary"
+    91→        style={{
+    92→          fontSize: `${size}px`,
+    93→          fontVariationSettings: i <= Math.round(rating) ? "'FILL' 1" : undefined,
+    94→          opacity: i <= Math.round(rating) ? 1 : 0.3,
+    95→        }}
+    96→      >
+    97→        star
+    98→      </span>
+    99→    ))}
+   100→  </div>
+   101→);
+   102→
+   103→// ----------------------------------------------------------------------------
+   104→// Single comment + nested replies (recursive)
+   105→// ----------------------------------------------------------------------------
+   106→interface CommentItemProps {
+   107→  comment: CommentDTO;
+   108→  isReply?: boolean;
+   109→  replyingTo: string | null;
+   110→  onToggleReply: (id: string) => void;
+   111→  onSubmitReply: (parentId: string, content: string) => void;
+   112→  onDelete: (id: string) => void;
+   113→}
+   114→
+   115→const CommentItem: React.FC<CommentItemProps> = ({
+   116→  comment,
+   117→  isReply = false,
+   118→  replyingTo,
+   119→  onToggleReply,
+   120→  onSubmitReply,
+   121→  onDelete,
+   122→}) => {
+   123→  const [replyText, setReplyText] = useState("");
+   124→  const initials = (comment.userName || "A").charAt(0).toUpperCase();
+   125→  const formattedDate = new Date(comment.createdAt).toLocaleDateString("fr-FR", {
+   126→    day: "numeric",
+   127→    month: "short",
+   128→    year: "numeric",
+   129→  });
+   130→  const showReplyForm = replyingTo === comment.id;
+   131→
+   132→  const handleSubmit = () => {
+   133→    if (!replyText.trim()) return;
+   134→    onSubmitReply(comment.id, replyText);
+   135→    setReplyText("");
+   136→  };
+   137→
+   138→  return (
+   139→    <div className={isReply ? "ml-10 sm:ml-12" : ""}>
+   140→      <div className="bg-surface-container-low rounded-lg p-3 border border-outline-variant/10">
+   141→        <div className="flex items-start gap-3">
+   142→          <div className="w-8 h-8 rounded-full bg-primary/20 text-primary flex items-center justify-center font-bold text-body-sm shrink-0">
+   143→            {initials}
+   144→          </div>
+   145→          <div className="flex-1 min-w-0">
+   146→            <div className="flex items-center justify-between gap-2 flex-wrap">
+   147→              <div className="flex items-center gap-2">
+   148→                <span className="font-bold text-on-surface text-body-sm">
+   149→                  {comment.userName}
+   150→                </span>
+   151→                {comment.rating > 0 && <StarRow rating={comment.rating} size={11} />}
+   152→              </div>
+   153→              <span className="text-label-sm text-outline">{formattedDate}</span>
+   154→            </div>
+   155→            <p className="text-body-sm text-on-surface-variant mt-1 whitespace-pre-wrap break-words">
+   156→              {comment.content}
+   157→            </p>
+   158→            <div className="flex items-center gap-3 mt-2">
+   159→              {!isReply && (
+   160→                <button
+   161→                  onClick={() => onToggleReply(comment.id)}
+   162→                  className="text-label-sm text-primary font-semibold flex items-center gap-1 hover:underline cursor-pointer"
+   163→                >
+   164→                  <span className="material-symbols-outlined text-[14px]">reply</span>
+   165→                  Répondre
+   166→                </button>
+   167→              )}
+   168→              <button
+   169→                onClick={() => onDelete(comment.id)}
+   170→                className="text-label-sm text-outline hover:text-error flex items-center gap-1 cursor-pointer ml-auto"
+   171→                title="Supprimer ce commentaire"
+   172→              >
+   173→                <span className="material-symbols-outlined text-[14px]">delete</span>
+   174→              </button>
+   175→            </div>
+   176→          </div>
+   177→        </div>
+   178→      </div>
+   179→
+   180→      {/* Inline reply form */}
+   181→      {showReplyForm && (
+   182→        <div className="mt-2 ml-11 bg-surface-container-low rounded-lg p-2 border border-outline-variant/10 flex gap-2 items-end">
+   183→          <textarea
+   184→            value={replyText}
+   185→            onChange={(e) => setReplyText(e.target.value)}
+   186→            placeholder="Votre réponse..."
+   187→            rows={2}
+   188→            className="flex-1 p-2 bg-surface-container text-on-surface text-body-sm rounded outline-none focus:ring-2 focus:ring-primary border border-outline-variant/20 resize-none"
+   189→          />
+   190→          <button
+   191→            onClick={handleSubmit}
+   192→            disabled={!replyText.trim()}
+   193→            className="px-3 py-1.5 rounded-lg bg-primary text-on-primary text-label-sm font-bold flex items-center gap-1 hover:scale-105 transition-transform cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+   194→            title="Publier la réponse"
+   195→          >
+   196→            <span className="material-symbols-outlined text-[14px]">send</span>
+   197→          </button>
+   198→        </div>
+   199→      )}
+   200→
+   201→      {/* Nested replies */}
+   202→      {comment.replies && comment.replies.length > 0 && (
+   203→        <div className="mt-2 space-y-2">
+   204→          {comment.replies.map((reply) => (
+   205→            <CommentItem
+   206→              key={reply.id}
+   207→              comment={reply}
+   208→              isReply
+   209→              replyingTo={replyingTo}
+   210→              onToggleReply={onToggleReply}
+   211→              onSubmitReply={onSubmitReply}
+   212→              onDelete={onDelete}
+   213→            />
+   214→          ))}
+   215→        </div>
+   216→      )}
+   217→    </div>
+   218→  );
+   219→};
+   220→
+   221→/**
+   222→ * Secure in-app stream player modal — full reading page with hero, video
+   223→ * player, info section, series episodes section (if series), and comments &
+   224→ * reviews section.
+   225→ *
+   226→ * Ported from the original maquette with the following adjustments:
+   227→ *  - The fake URL/address bar (lock icon, domain, path, "SSL Sécurisé" badge)
+   228→ *    is REMOVED entirely so only the video and player controls remain.
+   229→ *  - On mount we fetch the real extracted servers from
+   230→ *    `GET /api/extract?id=${item.id}` (Playwright, cached 30 min server-side).
+   231→ *    A spinner with "Extraction des lecteurs en cours…" is shown while
+   232→ *    Playwright runs (~10-15s on first call).
+   233→ *  - Smart rendering: if `currentServer.videoUrl` is a direct video URL
+   234→ *    (mp4/m3u8/webm or any http(s) URL that isn't /api/proxy), we render a
+   235→ *    native `<video>` element and wire every player control to it via refs
+   236→ *    (play/pause, timeline scrub, volume, skip ±10s, fullscreen). If the URL
+   237→ *    is `/api/proxy?page=...` (extraction failed/empty), we fall back to the
+   238→ *    filtered `<iframe>` as before.
+   239→ *  - The "Site Complet (Nettoyé)" view mode toggle is removed — only the
+   240→ *    cinematic player view remains.
+   241→ *  - NEW: Series episodes section — if `item.category === "Séries"`, fetches
+   242→ *    `/api/series-structure?id=${item.id}` on mount and renders a season
+   243→ *    selector + episode list (VF episodes prioritized). Selecting an episode
+   244→ *    sets it as the current video source.
+   245→ *  - NEW: Comments & reviews section — always shows. Fetches
+   246→ *    `/api/comments?streamItemId=${item.id}`, supports star ratings, replies,
+   247→ *    and deletion. After POST, refreshes the list.
+   248→ *  - The maquette chrome (top action bar, uBlock badge, player stage, bottom
+   249→ *    control bar, server selector, media details, uBlock protection banner)
+   250→ *    is preserved identically.
+   251→ */
+   252→export const SecureBrowserModal: React.FC<SecureBrowserModalProps> = ({
+   253→  item,
+   254→  onClose,
+   255→  onStartDownload,
+   256→  isFavorite,
+   257→  onToggleFavorite,
+   258→  onSelectRelatedItem,
+   259→}) => {
+   260→  // ---- Server fetch state (populated from /api/extract on mount) ----
+   261→  const [servers, setServers] = useState<StreamServer[]>([]);
+   262→  const [serversLoading, setServersLoading] = useState(true);
+   263→
+   264→  // ---- Player state ----
+   265→  const [selectedServerIndex, setSelectedServerIndex] = useState(0);
+   266→  const [selectedEpisode, setSelectedEpisode] = useState<SeriesEpisode | null>(null);
+   267→  const [isPlaying, setIsPlaying] = useState(true);
+   268→  const [isFullscreen, setIsFullscreen] = useState(false);
+   269→  const [currentTime, setCurrentTime] = useState(0);
+   270→  const [duration, setDuration] = useState(0);
+   271→  const [volume, setVolume] = useState(85);
+   272→  const [isMuted, setIsMuted] = useState(false);
+   273→  const [showUBlockModal, setShowUBlockModal] = useState(false);
+   274→  const [blockedAdsOnPage, setBlockedAdsOnPage] = useState(
+   275→    (item.blockedAdStats?.popups || 12) + (item.blockedAdStats?.adultBanners || 6)
+   276→  );
+   277→  const [iframeKey, setIframeKey] = useState(0);
+   278→  const [switchingServer, setSwitchingServer] = useState(false);
+   279→
+   280→  // ---- Series structure state (fetched from /api/series-structure) ----
+   281→  const [seriesStructure, setSeriesStructure] = useState<SeriesStructure | null>(null);
+   282→  const [seriesLoading, setSeriesLoading] = useState(false);
+   283→  const [selectedSeason, setSelectedSeason] = useState(1);
+   284→
+   285→  // ---- Comments state (fetched from /api/comments) ----
+   286→  const [comments, setComments] = useState<CommentDTO[]>([]);
+   287→  const [commentsLoading, setCommentsLoading] = useState(true);
+   288→  const [averageRating, setAverageRating] = useState(0);
+   289→  const [newCommentName, setNewCommentName] = useState("");
+   290→  const [newCommentRating, setNewCommentRating] = useState(0);
+   291→  const [hoverRating, setHoverRating] = useState(0);
+   292→  const [newCommentContent, setNewCommentContent] = useState("");
+   293→  const [submittingComment, setSubmittingComment] = useState(false);
+   294→  const [replyingTo, setReplyingTo] = useState<string | null>(null);
+   295→
+   296→  const containerRef = useRef<HTMLDivElement>(null);
+   297→  const videoRef = useRef<HTMLVideoElement>(null);
+   298→
+   299→  // Detect series: item.category === "Séries" OR item.episodes already populated.
+   300→  const isSeries =
+   301→    item.category === "Séries" ||
+   302→    item.category === "Animés" ||
+   303→    (Array.isArray(item.episodes) && item.episodes.length > 0);
+   304→
+   305→  // Build the proxy fallback server (used when extraction fails or returns []).
+   306→  const buildProxyFallback = useCallback((): StreamServer => ({
+   307→    id: `srv-${item.id}-secure`,
+   308→    name: "Lecteur Sécurisé (proxy)",
+   309→    hoster: "Direct 4K",
+   310→    quality: item.quality,
+   311→    language: "VF",
+   312→    speed: "Ultra Rapide (sans pub)",
+   313→    videoUrl: apiUrl(`/api/proxy?page=${encodeURIComponent(item.id)}`),
+   314→  }), [item.id, item.quality]);
+   315→
+   316→  // Fetch real extracted servers from /api/extract on mount (and when item.id changes).
+   317→  useEffect(() => {
+   318→    let cancelled = false;
+   319→    setServersLoading(true);
+   320→    setSwitchingServer(false);
+   321→    setSelectedServerIndex(0);
+   322→    setSelectedEpisode(null);
+   323→    setCurrentTime(0);
+   324→    setDuration(0);
+   325→    setIsPlaying(true);
+   326→
+   327→    fetch(apiUrl(`/api/extract?id=${encodeURIComponent(item.id)}`))
+   328→      .then((r) => {
+   329→        if (!r.ok) throw new Error(`extract failed: ${r.status}`);
+   330→        return r.json();
+   331→      })
+   332→      .then((data: StreamServer[] | { servers?: StreamServer[] }) => {
+   333→        if (cancelled) return;
+   334→        const list: StreamServer[] = Array.isArray(data)
+   335→          ? data
+   336→          : (data?.servers || []);
+   337→        if (list.length > 0) {
+   338→          setServers(list);
+   339→        } else {
+   340→          // Empty result — fall back to a single proxy server.
+   341→          setServers([buildProxyFallback()]);
+   342→        }
+   343→      })
+   344→      .catch(() => {
+   345→        if (cancelled) return;
+   346→        // Network/extractor error — fall back to a single proxy server.
+   347→        setServers([buildProxyFallback()]);
+   348→      })
+   349→      .finally(() => {
+   350→        if (!cancelled) setServersLoading(false);
+   351→      });
+   352→
+   353→    return () => { cancelled = true; };
+   354→  }, [item.id, buildProxyFallback]);
+   355→
+   356→  // Fetch series structure (only if item is a series).
+   357→  useEffect(() => {
+   358→    if (!isSeries) {
+   359→      setSeriesStructure(null);
+   360→      return;
+   361→    }
+   362→    let cancelled = false;
+   363→    setSeriesLoading(true);
+   364→
+   365→    fetch(apiUrl(`/api/series-structure?id=${encodeURIComponent(item.id)}`))
+   366→      .then((r) => {
+   367→        if (!r.ok) throw new Error(`series-structure failed: ${r.status}`);
+   368→        return r.json();
+   369→      })
+   370→      .then((data: SeriesStructure) => {
+   371→        if (cancelled) return;
+   372→        setSeriesStructure(data);
+   373→        // Default to the current season (or 1 if none)
+   374→        setSelectedSeason(data.currentSeason || data.seasons?.[0]?.seasonNumber || 1);
+   375→      })
+   376→      .catch(() => {
+   377→        if (cancelled) return;
+   378→        setSeriesStructure(null);
+   379→      })
+   380→      .finally(() => {
+   381→        if (!cancelled) setSeriesLoading(false);
+   382→      });
+   383→
+   384→    return () => { cancelled = true; };
+   385→    // eslint-disable-next-line react-hooks/exhaustive-deps
+   386→  }, [item.id, isSeries]);
+   387→
+   388→  // Fetch comments on mount (always).
+   389→  // `refreshComments` is also called after every POST/DELETE to keep the list
+   390→  // in sync. The cancellation flag only applies to the most recent call, so
+   391→  // late state updates from a stale fetch are silently ignored.
+   392→  const commentsCancelRef = useRef<() => void>(() => {});
+   393→  const refreshComments = useCallback(() => {
+   394→    // Cancel any in-flight comment fetch first.
+   395→    commentsCancelRef.current();
+   396→    let cancelled = false;
+   397→    commentsCancelRef.current = () => { cancelled = true; };
+   398→    setCommentsLoading(true);
+   399→    fetch(apiUrl(`/api/comments?streamItemId=${encodeURIComponent(item.id)}`))
+   400→      .then((r) => {
+   401→        if (!r.ok) throw new Error(`comments failed: ${r.status}`);
+   402→        return r.json();
+   403→      })
+   404→      .then((data: { comments: CommentDTO[]; total: number; averageRating: number }) => {
+   405→        if (cancelled) return;
+   406→        setComments(data.comments || []);
+   407→        setAverageRating(data.averageRating || 0);
+   408→      })
+   409→      .catch(() => {
+   410→        if (cancelled) return;
+   411→        setComments([]);
+   412→        setAverageRating(0);
+   413→      })
+   414→      .finally(() => {
+   415→        if (!cancelled) setCommentsLoading(false);
+   416→      });
+   417→  }, [item.id]);
+   418→
+   419→  useEffect(() => {
+   420→    refreshComments();
+   421→    // On unmount, cancel the in-flight comment fetch.
+   422→    return () => commentsCancelRef.current();
+   423→  }, [refreshComments]);
+   424→
+   425→  const currentServer = servers[selectedServerIndex] || servers[0];
+   426→
+   427→  // Resolve the URL to actually play. Selected episode wins (for series),
+   428→  // otherwise the current server's videoUrl, otherwise the proxy.
+   429→  const currentVideoUrl: string =
+   430→    selectedEpisode?.videoUrl ||
+   431→    currentServer?.videoUrl ||
+   432→    apiUrl(`/api/proxy?page=${encodeURIComponent(item.id)}`);
+   433→
+   434→  const directVideo = isDirectVideo(currentVideoUrl);
+   435→  const isHlsStream = directVideo && /\.m3u8(\?|$)/i.test(currentVideoUrl);
+   436→
+   437→  // Attach HLS.js to the <video> element when the stream is a .m3u8 URL.
+   438→  // Native HLS (Safari/iOS) doesn't need hls.js — it plays .m3u8 directly.
+   439→  useEffect(() => {
+   440→    if (!directVideo || !isHlsStream) return;
+   441→    const video = videoRef.current;
+   442→    if (!video) return;
+   443→
+   444→    let hls: import("hls.js").default | null = null;
+   445→
+   446→    // Native HLS support (Safari, iOS)
+   447→    if (video.canPlayType("application/vnd.apple.mpegurl")) {
+   448→      video.src = currentVideoUrl;
+   449→      video.play().catch(() => {});
+   450→      return () => {
+   451→        video.removeAttribute("src");
+   452→        video.load();
+   453→      };
+   454→    }
+   455→
+   456→    // Other browsers → use hls.js
+   457→    let cancelled = false;
+   458→    (async () => {
+   459→      if (!HlsModule) {
+   460→        HlsModule = (await import("hls.js")).default;
+   461→      }
+   462→      if (cancelled || !HlsModule) return;
+   463→      if (!HlsModule.isSupported()) return;
+   464→      hls = new HlsModule({ enableWorker: true, lowLatencyMode: false });
+   465→      hls.loadSource(currentVideoUrl);
+   466→      hls.attachMedia(video);
+   467→      hls.on(HlsModule.Events.MANIFEST_PARSED, () => {
+   468→        video.play().catch(() => {});
+   469→        setSwitchingServer(false);
+   470→      });
+   471→      hls.on(HlsModule.Events.ERROR, (_evt, data) => {
+   472→        if (data.fatal) {
+   473→          console.error("[hls.js] fatal error:", data);
+   474→          setSwitchingServer(false);
+   475→        }
+   476→      });
+   477→    })();
+   478→
+   479→    return () => {
+   480→      cancelled = true;
+   481→      if (hls) {
+   482→        hls.destroy();
+   483→      }
+   484→    };
+   485→  }, [currentVideoUrl, directVideo, isHlsStream]);
+   486→
+   487→  const domain = item.sourceServiceId
+   488→    ? `${item.sourceServiceId}.net`
+   489→    : "french-stream.net";
+   490→
+   491→  // =========================================================================
+   492→  // Native <video> controls — every control below is wired to videoRef.
+   493→  // =========================================================================
+   494→
+   495→  const togglePlay = useCallback(() => {
+   496→    const v = videoRef.current;
+   497→    if (!v) {
+   498→      setIsPlaying((prev) => !prev);
+   499→      return;
+   500→    }
+   501→    if (v.paused) {
+   502→      v.play().then(() => setIsPlaying(true)).catch(() => {});
+   503→    } else {
+   504→      v.pause();
+   505→      setIsPlaying(false);
+   506→    }
+   507→  }, []);
+   508→
+   509→  const toggleFullscreen = useCallback(() => {
+   510→    if (!containerRef.current) return;
+   511→    if (!document.fullscreenElement) {
+   512→      containerRef.current
+   513→        .requestFullscreen?.()
+   514→        .then(() => setIsFullscreen(true))
+   515→        .catch(() => {});
+   516→    } else {
+   517→      document.exitFullscreen?.()
+   518→        .then(() => setIsFullscreen(false))
+   519→        .catch(() => {});
+   520→    }
+   521→  }, []);
+   522→
+   523→  const skipBy = useCallback((delta: number) => {
+   524→    const v = videoRef.current;
+   525→    if (!v) return;
+   526→    const target = Math.max(0, Math.min(v.duration || 0, v.currentTime + delta));
+   527→    v.currentTime = target;
+   528→    setCurrentTime(target);
+   529→  }, []);
+   530→
+   531→  const handleSeek = (e: React.MouseEvent<HTMLDivElement>) => {
+   532→    const v = videoRef.current;
+   533→    if (!v || !v.duration) return;
+   534→    const rect = e.currentTarget.getBoundingClientRect();
+   535→    const pos = (e.clientX - rect.left) / rect.width;
+   536→    const newTime = Math.max(0, Math.min(v.duration, pos * v.duration));
+   537→    v.currentTime = newTime;
+   538→    setCurrentTime(newTime);
+   539→  };
+   540→
+   541→  const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+   542→    const newVol = Number(e.target.value);
+   543→    setVolume(newVol);
+   544→    setIsMuted(false);
+   545→    const v = videoRef.current;
+   546→    if (v) {
+   547→      v.volume = newVol / 100;
+   548→      v.muted = false;
+   549→    }
+   550→  };
+   551→
+   552→  const toggleMute = useCallback(() => {
+   553→    const v = videoRef.current;
+   554→    if (!v) {
+   555→      setIsMuted((p) => !p);
+   556→      return;
+   557→    }
+   558→    v.muted = !v.muted;
+   559→  }, []);
+   560→
+   561→  const formatSeconds = (sec: number) => {
+   562→    if (!sec || !isFinite(sec)) return "0:00";
+   563→    const mins = Math.floor(sec / 60);
+   564→    const s = Math.floor(sec % 60);
+   565→    return `${mins}:${s < 10 ? "0" : ""}${s}`;
+   566→  };
+   567→
+   568→  const handleServerSwitch = (idx: number) => {
+   569→    if (idx === selectedServerIndex) return;
+   570→    setSwitchingServer(true);
+   571→    setSelectedServerIndex(idx);
+   572→    setSelectedEpisode(null);
+   573→    setIsPlaying(true);
+   574→    setCurrentTime(0);
+   575→    setDuration(0);
+   576→  };
+   577→
+   578→  const handleSelectEpisode = (episode: SeriesEpisode) => {
+   579→    setSwitchingServer(true);
+   580→    setSelectedEpisode(episode);
+   581→    setIsPlaying(true);
+   582→    setCurrentTime(0);
+   583→    setDuration(0);
+   584→  };
+   585→
+   586→  const handleSelectSeason = (season: number) => {
+   587→    setSelectedSeason(season);
+   588→    // Don't clear selectedEpisode here — let the user keep their place if the
+   589→    // episode exists in the new season. Otherwise the episode list will just
+   590→    // not contain it.
+   591→  };
+   592→
+   593→  const handleRefresh = () => {
+   594→    // Re-filter ads and reload the video/iframe.
+   595→    uBlockEngineInstance.inspectUrl("https://syndication.exoclick.com/splash.php?partner=french-stream");
+   596→    uBlockEngineInstance.inspectUrl("https://serve.popads.net/serve.js?partner=french-stream");
+   597→    setBlockedAdsOnPage((prev) => prev + 2);
+   598→    setIframeKey((k) => k + 1);
+   599→    setSwitchingServer(true);
+   600→    // For native video, force a reload by re-assigning src and calling load().
+   601→    if (videoRef.current && directVideo) {
+   602→      const v = videoRef.current;
+   603→      const src = v.src;
+   604→      v.removeAttribute("src");
+   605→      v.load();
+   606→      v.src = src;
+   607→      v.load();
+   608→      v.play().then(() => setIsPlaying(true)).catch(() => {});
+   609→    }
+   610→  };
+   611→
+   612→  // Track fullscreen changes (so Esc from fullscreen updates the icon).
+   613→  useEffect(() => {
+   614→    const onFsChange = () => setIsFullscreen(!!document.fullscreenElement);
+   615→    document.addEventListener("fullscreenchange", onFsChange);
+   616→    return () => document.removeEventListener("fullscreenchange", onFsChange);
+   617→  }, []);
+   618→
+   619→  // Keyboard navigation & remote-control shortcuts.
+   620→  useEffect(() => {
+   621→    const handleKeyDown = (e: KeyboardEvent) => {
+   622→      if (["INPUT", "TEXTAREA"].includes((e.target as HTMLElement)?.tagName)) return;
+   623→
+   624→      if (e.key === "Escape") {
+   625→        // If we're in fullscreen, let the browser exit fullscreen first;
+   626→        // only close the modal when not in fullscreen.
+   627→        if (!document.fullscreenElement) {
+   628→          e.preventDefault();
+   629→          onClose();
+   630→        }
+   631→      } else if (e.key === " " || e.key === "Enter") {
+   632→        e.preventDefault();
+   633→        togglePlay();
+   634→      } else if (e.key === "f" || e.key === "F") {
+   635→        e.preventDefault();
+   636→        toggleFullscreen();
+   637→      } else if (e.key === "ArrowUp") {
+   638→        e.preventDefault();
+   639→        const newVol = Math.min(100, volume + 10);
+   640→        setVolume(newVol);
+   641→        setIsMuted(false);
+   642→        if (videoRef.current) {
+   643→          videoRef.current.volume = newVol / 100;
+   644→          videoRef.current.muted = false;
+   645→        }
+   646→      } else if (e.key === "ArrowDown") {
+   647→        e.preventDefault();
+   648→        const newVol = Math.max(0, volume - 10);
+   649→        setVolume(newVol);
+   650→        if (videoRef.current) {
+   651→          videoRef.current.volume = newVol / 100;
+   652→        }
+   653→      } else if (e.key === "m" || e.key === "M") {
+   654→        e.preventDefault();
+   655→        toggleMute();
+   656→      } else if (e.key === "ArrowLeft") {
+   657→        e.preventDefault();
+   658→        skipBy(-10);
+   659→      } else if (e.key === "ArrowRight") {
+   660→        e.preventDefault();
+   661→        skipBy(10);
+   662→      }
+   663→    };
+   664→
+   665→    window.addEventListener("keydown", handleKeyDown);
+   666→    return () => window.removeEventListener("keydown", handleKeyDown);
+   667→  }, [volume, togglePlay, toggleFullscreen, toggleMute, skipBy, onClose]);
+   668→
+   669→  // Server label: proxy fallbacks get the "Lecteur Sécurisé (proxy)" label,
+   670→  // direct-video servers show their hoster name.
+   671→  const serverLabel = (srv: StreamServer): string => {
+   672→    if (srv.videoUrl && !isDirectVideo(srv.videoUrl)) {
+   673→      return "Lecteur Sécurisé (proxy)";
+   674→    }
+   675→    return srv.name || srv.hoster;
+   676→  };
+   677→
+   678→  // Timeline fill percentage (guard against div-by-zero before metadata loads).
+   679→  const timelinePct = duration > 0 ? (currentTime / duration) * 100 : 0;
+   680→
+   681→  // =========================================================================
+   682→  // Series structure helpers
+   683→  // =========================================================================
+   684→  // Filter to VF episodes (per user spec — focus on VF). Fall back to all
+   685→  // episodes if no VF ones exist for this season.
+   686→  const vfEpisodes = (seriesStructure?.episodes || []).filter(
+   687→    (e) => e.language === "VF"
+   688→  );
+   689→  const allSeasonEpisodes = (seriesStructure?.episodes || []).filter(
+   690→    (e) => e.seasonNumber === selectedSeason
+   691→  );
+   692→  const seasonVfEpisodes = vfEpisodes.filter(
+   693→    (e) => e.seasonNumber === selectedSeason
+   694→  );
+   695→  const seasonEpisodes = seasonVfEpisodes.length > 0 ? seasonVfEpisodes : allSeasonEpisodes;
+   696→
+   697→  // =========================================================================
+   698→  // Comments handlers
+   699→  // =========================================================================
+   700→  const handleSubmitComment = async () => {
+   701→    if (!newCommentContent.trim()) return;
+   702→    setSubmittingComment(true);
+   703→    try {
+   704→      await fetch(apiUrl("/api/comments"), {
+   705→        method: "POST",
+   706→        headers: { "Content-Type": "application/json" },
+   707→        body: JSON.stringify({
+   708→          streamItemId: item.id,
+   709→          userName: newCommentName.trim() || "Anonyme",
+   710→          rating: newCommentRating,
+   711→          content: newCommentContent.trim(),
+   712→        }),
+   713→      });
+   714→      setNewCommentName("");
+   715→      setNewCommentRating(0);
+   716→      setNewCommentContent("");
+   717→      setHoverRating(0);
+   718→      refreshComments();
+   719→    } catch {
+   720→      /* silent */
+   721→    } finally {
+   722→      setSubmittingComment(false);
+   723→    }
+   724→  };
+   725→
+   726→  const handleReplySubmit = async (parentId: string, content: string) => {
+   727→    if (!content.trim()) return;
+   728→    try {
+   729→      await fetch(apiUrl("/api/comments"), {
+   730→        method: "POST",
+   731→        headers: { "Content-Type": "application/json" },
+   732→        body: JSON.stringify({
+   733→          streamItemId: item.id,
+   734→          userName: "Anonyme",
+   735→          content: content.trim(),
+   736→          parentId,
+   737→        }),
+   738→      });
+   739→      setReplyingTo(null);
+   740→      refreshComments();
+   741→    } catch {
+   742→      /* silent */
+   743→    }
+   744→  };
+   745→
+   746→  const handleDeleteComment = async (id: string) => {
+   747→    try {
+   748→      await fetch(apiUrl(`/api/comments?id=${encodeURIComponent(id)}`), {
+   749→        method: "DELETE",
+   750→      });
+   751→      refreshComments();
+   752→    } catch {
+   753→      /* silent */
+   754→    }
+   755→  };
+   756→
+   757→  const handleToggleReply = (id: string) => {
+   758→    setReplyingTo((prev) => (prev === id ? null : id));
+   759→  };
+   760→
+   761→  const handleShare = async () => {
+   762→    const shareUrl = typeof window !== "undefined" ? window.location.href : "";
+   763→    try {
+   764→      if (navigator.share) {
+   765→        await navigator.share({ title: item.title, url: shareUrl });
+   766→      } else if (navigator.clipboard) {
+   767→        await navigator.clipboard.writeText(`${item.title} — ${shareUrl}`);
+   768→      }
+   769→    } catch {
+   770→      /* silent */
+   771→    }
+   772→  };
+   773→
+   774→  // Episode id used in the video/iframe key (so switching episode reloads the player).
+   775→  const episodeKeyFragment = selectedEpisode?.id || "default";
+   776→
+   777→  return (
+   778→    <div
+   779→      className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-black/90 backdrop-blur-md animate-fade-in"
+   780→      onClick={onClose}
+   781→    >
+   782→      <div
+   783→        ref={containerRef}
+   784→        className="w-full max-w-6xl bg-surface-container-high rounded-2xl overflow-hidden shadow-2xl border border-outline-variant/20 flex flex-col h-[94vh]"
+   785→        onClick={(e) => e.stopPropagation()}
+   786→      >
+   787→        {/* Secure In-App Browser Top Action Bar (URL bar removed) */}
+   788→        <div className="bg-surface-container-highest px-3 py-2 border-b border-outline-variant/15 flex items-center justify-between gap-2 flex-wrap shrink-0">
+   789→          {/* Left: Navigation Controls (back & refresh) + uBlock blocked-ads pill */}
+   790→          <div className="flex items-center gap-1 text-on-surface-variant shrink-0">
+   791→            <button
+   792→              onClick={onClose}
+   793→              className="w-8 h-8 rounded-full hover:bg-surface-container flex items-center justify-center transition-colors cursor-pointer"
+   794→              title="Fermer (Échap)"
+   795→            >
+   796→              <span className="material-symbols-outlined text-[18px]">arrow_back</span>
+   797→            </button>
+   798→            <button
+   799→              onClick={handleRefresh}
+   800→              className="w-8 h-8 rounded-full hover:bg-surface-container flex items-center justify-center transition-colors cursor-pointer"
+   801→              title="Actualiser et re-filtrer les pubs"
+   802→            >
+   803→              <span className="material-symbols-outlined text-[18px]">refresh</span>
+   804→            </button>
+   805→            <div className="flex items-center gap-1.5 ml-2 px-2.5 py-1 rounded-full bg-primary/10 border border-primary/30 text-primary text-[11px] font-semibold">
+   806→              <span className="material-symbols-outlined text-[14px]">shield</span>
+   807→              <span className="font-bold">{blockedAdsOnPage} pubs bloquées</span>
+   808→              <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
+   809→            </div>
+   810→          </div>
+   811→
+   812→          {/* Right: Action Buttons (uBlock, download, favorite, fullscreen, close) */}
+   813→          <div className="flex items-center gap-2">
+   814→            {/* uBlock Origin Shield Trigger */}
+   815→            <button
+   816→              onClick={() => setShowUBlockModal(true)}
+   817→              className="flex items-center gap-1.5 bg-primary/10 hover:bg-primary/20 text-primary text-[11px] font-semibold px-2.5 py-1.5 rounded-full border border-primary/30 transition-all cursor-pointer"
+   818→              title="Ouvrir le panneau uBlock Origin"
+   819→            >
+   820→              <span className="material-symbols-outlined text-[15px]">shield</span>
+   821→              <span className="font-bold hidden md:inline">uBlock</span>
+   822→              <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
+   823→            </button>
+   824→
+   825→            {/* Direct Download button */}
+   826→            <button
+   827→              onClick={() => onStartDownload(item)}
+   828→              className="px-3 py-1.5 rounded-full bg-primary text-on-primary text-label-sm font-bold flex items-center gap-1 hover:scale-105 transition-all cursor-pointer shadow-sm"
+   829→              title="Télécharger directement la vidéo sans pub"
+   830→            >
+   831→              <span className="material-symbols-outlined text-[16px]">download</span>
+   832→              <span className="hidden md:inline">Télécharger</span>
+   833→            </button>
+   834→
+   835→            {/* Favorite toggle */}
+   836→            <button
+   837→              onClick={() => onToggleFavorite(item.id)}
+   838→              className="w-8 h-8 rounded-full bg-surface-container flex items-center justify-center text-on-surface hover:text-primary transition-colors cursor-pointer"
+   839→              title={isFavorite ? "Retirer des favoris" : "Ajouter aux favoris"}
+   840→            >
+   841→              <span
+   842→                className={`material-symbols-outlined text-[18px] ${
+   843→                  isFavorite ? "text-primary fill-current" : ""
+   844→                }`}
+   845→                style={isFavorite ? { fontVariationSettings: "'FILL' 1" } : undefined}
+   846→              >
+   847→                favorite
+   848→              </span>
+   849→            </button>
+   850→
+   851→            {/* Fullscreen toggle */}
+   852→            <button
+   853→              onClick={toggleFullscreen}
+   854→              className="w-8 h-8 rounded-full bg-surface-container flex items-center justify-center text-on-surface hover:text-primary transition-colors cursor-pointer"
+   855→              title="Plein écran (F)"
+   856→            >
+   857→              <span className="material-symbols-outlined text-[18px]">
+   858→                {isFullscreen ? "fullscreen_exit" : "fullscreen"}
+   859→              </span>
+   860→            </button>
+   861→
+   862→            {/* Close */}
+   863→            <button
+   864→              onClick={onClose}
+   865→              className="w-8 h-8 rounded-full bg-surface-container flex items-center justify-center text-on-surface-variant hover:text-on-surface transition-colors cursor-pointer"
+   866→              title="Fermer"
+   867→            >
+   868→              <span className="material-symbols-outlined text-[18px]">close</span>
+   869→            </button>
+   870→          </div>
+   871→        </div>
+   872→
+   873→        {/* Modal Body — scrollable reading page */}
+   874→        <div className="flex-1 overflow-y-auto flex flex-col bg-surface-container-low guyma-scroll">
+   875→          {/* ============================================================= */}
+   876→          {/* 1. Hero section — backdrop + title overlay + action buttons   */}
+   877→          {/* ============================================================= */}
+   878→          <div className="relative aspect-video w-full bg-black overflow-hidden max-h-[42vh] shrink-0">
+   879→            {/* Backdrop image (use item.imageUrl, fall back to gradient) */}
+   880→            <img
+   881→              src={item.imageUrl}
+   882→              alt={item.title}
+   883→              referrerPolicy="no-referrer"
+   884→              className="w-full h-full object-cover opacity-60"
+   885→              onError={(e) => {
+   886→                (e.currentTarget as HTMLElement).style.display = "none";
+   887→              }}
+   888→            />
+   889→            <div
+   890→              className={`absolute inset-0 bg-gradient-to-br ${item.fallbackGradient} -z-10`}
+   891→            />
+   892→            {/* Gradient scrim */}
+   893→            <div className="absolute inset-0 bg-gradient-to-t from-surface-container-low via-black/40 to-transparent" />
+   894→
+   895→            {/* Title + badges overlay */}
+   896→            <div className="absolute bottom-0 inset-x-0 p-4 sm:p-6 flex flex-col gap-2">
+   897→              <div className="flex items-center gap-2 flex-wrap">
+   898→                {item.isLive ? (
+   899→                  <span className="bg-error text-on-error text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 shadow-sm">
+   900→                    <span className="w-1.5 h-1.5 rounded-full bg-on-error animate-pulse" /> LIVE
+   901→                  </span>
+   902→                ) : (
+   903→                  item.quality && (
+   904→                    <span className="bg-primary text-on-primary text-[11px] font-bold px-2 py-0.5 rounded flex items-center gap-1">
+   905→                      <span className="material-symbols-outlined text-[12px]">hd</span>
+   906→                      {item.quality}
+   907→                    </span>
+   908→                  )
+   909→                )}
+   910→                {item.releaseYear && (
+   911→                  <span className="bg-black/50 backdrop-blur-md text-on-surface text-[11px] font-bold px-2 py-0.5 rounded flex items-center gap-1">
+   912→                    <span className="material-symbols-outlined text-[12px]">calendar_today</span>
+   913→                    {item.releaseYear}
+   914→                  </span>
+   915→                )}
+   916→                {item.rating && (
+   917→                  <span className="bg-secondary/20 backdrop-blur-md text-secondary text-[11px] font-bold px-2 py-0.5 rounded flex items-center gap-1">
+   918→                    <span
+   919→                      className="material-symbols-outlined text-[12px]"
+   920→                      style={{ fontVariationSettings: "'FILL' 1" }}
+   921→                    >
+   922→                      star
+   923→                    </span>
+   924→                    {item.rating}/10
+   925→                  </span>
+   926→                )}
+   927→                {item.duration && (
+   928→                  <span className="bg-black/50 backdrop-blur-md text-on-surface text-[11px] font-bold px-2 py-0.5 rounded flex items-center gap-1">
+   929→                    <span className="material-symbols-outlined text-[12px]">schedule</span>
+   930→                    {item.duration}
+   931→                  </span>
+   932→                )}
+   933→              </div>
+   934→              <h1 className="text-headline-lg font-headline-lg text-on-surface text-[22px] sm:text-[28px] drop-shadow-lg">
+   935→                {item.title}
+   936→              </h1>
+   937→              {item.originalTitle && item.originalTitle !== item.title && (
+   938→                <p className="text-body-sm text-on-surface-variant italic">
+   939→                  Titre original : {item.originalTitle}
+   940→                </p>
+   941→              )}
+   942→
+   943→              {/* Action buttons */}
+   944→              <div className="flex items-center gap-2 flex-wrap mt-1">
+   945→                <button
+   946→                  onClick={togglePlay}
+   947→                  className="px-4 py-2 rounded-xl bg-primary text-on-primary text-body-sm font-bold flex items-center gap-1.5 hover:scale-105 transition-transform cursor-pointer shadow-md"
+   948→                >
+   949→                  <span className="material-symbols-outlined text-[18px]">
+   950→                    {isPlaying ? "pause" : "play_arrow"}
+   951→                  </span>
+   952→                  Lecture
+   953→                </button>
+   954→                <button
+   955→                  onClick={() => onStartDownload(item)}
+   956→                  className="px-3 py-2 rounded-xl bg-surface-container-high/80 backdrop-blur-md text-on-surface text-body-sm font-bold flex items-center gap-1.5 hover:bg-surface-container-highest transition-colors cursor-pointer border border-outline-variant/20"
+   957→                  title="Télécharger"
+   958→                >
+   959→                  <span className="material-symbols-outlined text-[18px]">download</span>
+   960→                  <span className="hidden sm:inline">Télécharger</span>
+   961→                </button>
+   962→                <button
+   963→                  onClick={() => onToggleFavorite(item.id)}
+   964→                  className={`px-3 py-2 rounded-xl backdrop-blur-md text-body-sm font-bold flex items-center gap-1.5 transition-colors cursor-pointer border border-outline-variant/20 ${
+   965→                    isFavorite
+   966→                      ? "bg-primary/20 text-primary"
+   967→                      : "bg-surface-container-high/80 text-on-surface hover:bg-surface-container-highest"
+   968→                  }`}
+   969→                  title={isFavorite ? "Retirer des favoris" : "Ajouter aux favoris"}
+   970→                >
+   971→                  <span
+   972→                    className="material-symbols-outlined text-[18px]"
+   973→                    style={isFavorite ? { fontVariationSettings: "'FILL' 1" } : undefined}
+   974→                  >
+   975→                    favorite
+   976→                  </span>
+   977→                  <span className="hidden sm:inline">{isFavorite ? "Favori" : "Favori"}</span>
+   978→                </button>
+   979→                <button
+   980→                  onClick={handleShare}
+   981→                  className="px-3 py-2 rounded-xl bg-surface-container-high/80 backdrop-blur-md text-on-surface text-body-sm font-bold flex items-center gap-1.5 hover:bg-surface-container-highest transition-colors cursor-pointer border border-outline-variant/20"
+   982→                  title="Partager"
+   983→                >
+   984→                  <span className="material-symbols-outlined text-[18px]">share</span>
+   985→                  <span className="hidden sm:inline">Partager</span>
+   986→                </button>
+   987→              </div>
+   988→            </div>
+   989→          </div>
+   990→
+   991→          {/* ============================================================= */}
+   992→          {/* 2. Video Player Stage                                         */}
+   993→          {/* ============================================================= */}
+   994→          <div className="relative aspect-video w-full bg-black flex items-center justify-center overflow-hidden group select-none max-h-[50vh] shrink-0">
+   995→            {serversLoading ? (
+   996→              /* ---- Extraction loading state ---- */
+   997→              <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 bg-surface-container-low">
+   998→                <div className="w-12 h-12 border-4 border-primary/30 border-t-primary rounded-full animate-spin" />
+   999→                <div className="text-center px-4">
+  1000→                  <p className="text-on-surface font-semibold text-body-md">
+  1001→                    Extraction des lecteurs en cours…
+  1002→                  </p>
+  1003→                  <p className="text-on-surface-variant text-[12px] mt-1">
+  1004→                    Analyse de la page source via Playwright (~10-15s au premier appel)
+  1005→                  </p>
+  1006→                </div>
+  1007→              </div>
+  1008→            ) : directVideo ? (
+  1009→              /* ---- Native <video> player (direct mp4/m3u8/webm URL) ---- */
+  1010→              <video
+  1011→                ref={videoRef}
+  1012→                key={`video-${iframeKey}-${selectedServerIndex}-${episodeKeyFragment}`}
+  1013→                src={isHlsStream ? undefined : currentVideoUrl}
+  1014→                autoPlay
+  1015→                playsInline
+  1016→                controls={false}
+  1017→                className="w-full h-full object-contain bg-black"
+  1018→                onPlay={() => setIsPlaying(true)}
+  1019→                onPause={() => setIsPlaying(false)}
+  1020→                onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
+  1021→                onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
+  1022→                onDurationChange={(e) => setDuration(e.currentTarget.duration)}
+  1023→                onVolumeChange={(e) => {
+  1024→                  setVolume(Math.round(e.currentTarget.volume * 100));
+  1025→                  setIsMuted(e.currentTarget.muted);
+  1026→                }}
+  1027→                onLoadedData={() => setSwitchingServer(false)}
+  1028→                onCanPlay={() => setSwitchingServer(false)}
+  1029→                onPlaying={() => setSwitchingServer(false)}
+  1030→                onWaiting={() => setSwitchingServer(true)}
+  1031→                onClick={togglePlay}
+  1032→              />
+  1033→            ) : (
+  1034→              /* ---- Filtered <iframe> proxy fallback ---- */
+  1035→              <iframe
+  1036→                key={`iframe-${iframeKey}-${selectedServerIndex}-${episodeKeyFragment}`}
+  1037→                src={currentVideoUrl}
+  1038→                title={item.title}
+  1039→                className="secure-iframe"
+  1040→                referrerPolicy="no-referrer"
+  1041→                sandbox="allow-scripts allow-same-origin allow-forms allow-presentation allow-popups"
+  1042→                allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
+  1043→                onLoad={() => setSwitchingServer(false)}
+  1044→              />
+  1045→            )}
+  1046→
+  1047→            {/* Switching-server loading overlay (above the video, below the controls) */}
+  1048→            {switchingServer && !serversLoading && (
+  1049→              <div className="absolute inset-0 flex items-center justify-center bg-black/60 backdrop-blur-sm z-30 pointer-events-none">
+  1050→                <div className="w-10 h-10 border-4 border-primary/30 border-t-primary rounded-full animate-spin" />
+  1051→              </div>
+  1052→            )}
+  1053→
+  1054→            {/* Direct Stream Protection Watermark */}
+  1055→            {!serversLoading && (
+  1056→              <div className="absolute top-3 left-3 bg-black/70 backdrop-blur-md border border-primary/30 text-primary text-[11px] px-3 py-1 rounded-full flex items-center gap-1.5 shadow-md pointer-events-none z-10">
+  1057→                <span className="material-symbols-outlined text-[14px]">shield</span>
+  1058→                <span>
+  1059→                  Flux {item.platform} • Filtré par uBlock Origin (Zéro Pub)
+  1060→                </span>
+  1061→              </div>
+  1062→            )}
+  1063→
+  1064→            {/* Video Quality Badge */}
+  1065→            {!serversLoading && currentServer && (
+  1066→              <div className="absolute top-3 right-3 bg-primary text-on-primary text-[11px] font-bold px-2 py-0.5 rounded shadow pointer-events-none z-10">
+  1067→                {selectedEpisode ? `S${selectedEpisode.seasonNumber} E${selectedEpisode.episodeNumber}` : currentServer.quality}
+  1068→              </div>
+  1069→            )}
+  1070→
+  1071→            {/* Big Center Play/Pause button */}
+  1072→            {!serversLoading && (
+  1073→              <button
+  1074→                onClick={togglePlay}
+  1075→                className="w-16 h-16 rounded-full bg-primary/90 text-on-primary flex items-center justify-center shadow-2xl transform active:scale-90 hover:scale-105 transition-all cursor-pointer z-20 opacity-0 group-hover:opacity-100 focus:opacity-100"
+  1076→              >
+  1077→                <span className="material-symbols-outlined text-[36px] ml-0.5">
+  1078→                  {isPlaying ? "pause" : "play_arrow"}
+  1079→                </span>
+  1080→              </button>
+  1081→            )}
+  1082→
+  1083→            {/* Bottom video control overlay (wired to the native <video> element) */}
+  1084→            {!serversLoading && (
+  1085→              <div className="absolute bottom-0 inset-x-0 p-3 bg-gradient-to-t from-black via-black/80 to-transparent flex flex-col gap-2 z-10 pointer-events-auto">
+  1086→                {/* Timeline scrubber */}
+  1087→                <div className="flex items-center gap-2">
+  1088→                  <span className="text-[11px] font-mono text-on-surface-variant">
+  1089→                    {formatSeconds(currentTime)}
+  1090→                  </span>
+  1091→                  <div
+  1092→                    className="flex-1 h-2 bg-white/20 rounded-full overflow-hidden cursor-pointer relative"
+  1093→                    onClick={handleSeek}
+  1094→                  >
+  1095→                    <div
+  1096→                      className="h-full bg-primary rounded-full transition-all"
+  1097→                      style={{ width: `${timelinePct}%` }}
+  1098→                    />
+  1099→                  </div>
+  1100→                  <span className="text-[11px] font-mono text-on-surface-variant">
+  1101→                    {formatSeconds(duration)}
+  1102→                  </span>
+  1103→                </div>
+  1104→
+  1105→                {/* Player buttons */}
+  1106→                <div className="flex items-center justify-between text-on-surface flex-wrap gap-2">
+  1107→                  <div className="flex items-center gap-3">
+  1108→                    <button
+  1109→                      onClick={togglePlay}
+  1110→                      className="hover:text-primary transition-colors cursor-pointer"
+  1111→                      title={isPlaying ? "Pause" : "Lecture"}
+  1112→                    >
+  1113→                      <span className="material-symbols-outlined text-[22px]">
+  1114→                        {isPlaying ? "pause" : "play_arrow"}
+  1115→                      </span>
+  1116→                    </button>
+  1117→
+  1118→                    {/* 10s backward */}
+  1119→                    <button
+  1120→                      onClick={() => skipBy(-10)}
+  1121→                      className="hover:text-primary transition-colors cursor-pointer"
+  1122→                      title="-10s"
+  1123→                    >
+  1124→                      <span className="material-symbols-outlined text-[20px]">replay_10</span>
+  1125→                    </button>
+  1126→                    {/* 10s forward */}
+  1127→                    <button
+  1128→                      onClick={() => skipBy(10)}
+  1129→                      className="hover:text-primary transition-colors cursor-pointer"
+  1130→                      title="+10s"
+  1131→                    >
+  1132→                      <span className="material-symbols-outlined text-[20px]">forward_10</span>
+  1133→                    </button>
+  1134→
+  1135→                    {/* Volume Slider */}
+  1136→                    <div className="flex items-center gap-1.5 ml-2">
+  1137→                      <button
+  1138→                        onClick={toggleMute}
+  1139→                        className="hover:text-primary transition-colors cursor-pointer"
+  1140→                        title={isMuted ? "Réactiver le son" : "Couper le son"}
+  1141→                      >
+  1142→                        <span className="material-symbols-outlined text-[20px]">
+  1143→                          {isMuted || volume === 0 ? "volume_off" : "volume_up"}
+  1144→                        </span>
+  1145→                      </button>
+  1146→                      <input
+  1147→                        type="range"
+  1148→                        min="0"
+  1149→                        max="100"
+  1150→                        value={isMuted ? 0 : volume}
+  1151→                        onChange={handleVolumeChange}
+  1152→                        className="w-18 h-1 accent-primary bg-white/20 rounded-full cursor-pointer"
+  1153→                      />
+  1154→                    </div>
+  1155→                  </div>
+  1156→
+  1157→                  <div className="flex items-center gap-3">
+  1158→                    {selectedEpisode ? (
+  1159→                      <span className="text-[11px] text-primary bg-primary/20 px-2 py-0.5 rounded font-bold">
+  1160→                        S{selectedEpisode.seasonNumber}:E{selectedEpisode.episodeNumber} · VF
+  1161→                      </span>
+  1162→                    ) : currentServer ? (
+  1163→                      <span className="text-[11px] text-primary bg-primary/20 px-2 py-0.5 rounded font-bold">
+  1164→                        {currentServer.hoster} ({currentServer.language})
+  1165→                      </span>
+  1166→                    ) : null}
+  1167→                    <button
+  1168→                      onClick={toggleFullscreen}
+  1169→                      className="hover:text-primary transition-colors cursor-pointer"
+  1170→                      title="Plein écran (F)"
+  1171→                    >
+  1172→                      <span className="material-symbols-outlined text-[20px]">
+  1173→                        {isFullscreen ? "fullscreen_exit" : "fullscreen"}
+  1174→                      </span>
+  1175→                    </button>
+  1176→                  </div>
+  1177→                </div>
+  1178→              </div>
+  1179→            )}
+  1180→          </div>
+  1181→
+  1182→          {/* ============================================================= */}
+  1183→          {/* 3. Streaming Controls Bar (servers selector + download)       */}
+  1184→          {/* ============================================================= */}
+  1185→          <div className="p-4 sm:p-6 space-y-5">
+  1186→            <div className="bg-surface-container rounded-xl p-3.5 border border-outline-variant/15 flex flex-col md:flex-row md:items-center justify-between gap-3">
+  1187→              <div className="flex items-center gap-2 flex-wrap">
+  1188→                <span className="text-body-sm text-outline font-semibold flex items-center gap-1">
+  1189→                  <span className="material-symbols-outlined text-[16px]">dns</span>
+  1190→                  Serveurs de streaming :
+  1191→                </span>
+  1192→                <div className="flex gap-1.5 flex-wrap">
+  1193→                  {serversLoading ? (
+  1194→                    <>
+  1195→                      {[0, 1, 2].map((i) => (
+  1196→                        <div
+  1197→                          key={`srv-skel-${i}`}
+  1198→                          className="px-3 py-1.5 rounded-lg bg-surface-container-high animate-pulse h-8 w-28"
+  1199→                        />
+  1200→                      ))}
+  1201→                    </>
+  1202→                  ) : (
+  1203→                    servers.map((srv, idx) => (
+  1204→                      <button
+  1205→                        key={srv.id}
+  1206→                        onClick={() => handleServerSwitch(idx)}
+  1207→                        className={`px-3 py-1.5 rounded-lg text-body-sm font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
+  1208→                          selectedServerIndex === idx
+  1209→                            ? "bg-primary text-on-primary font-bold shadow-sm"
+  1210→                            : "bg-surface-container-high text-on-surface-variant hover:text-on-surface"
+  1211→                        }`}
+  1212→                        title={
+  1213→                          isDirectVideo(srv.videoUrl)
+  1214→                            ? `${srv.hoster} • ${srv.quality} • ${srv.language}`
+  1215→                            : "Lecteur proxy filtré (repli)"
+  1216→                        }
+  1217→                      >
+  1218→                        <span>{serverLabel(srv)}</span>
+  1219→                        <span className="text-[10px] opacity-75 font-mono">[{srv.language}]</span>
+  1220→                      </button>
+  1221→                    ))
+  1222→                  )}
+  1223→                </div>
+  1224→              </div>
+  1225→
+  1226→              {/* Instant Direct Download Button */}
+  1227→              <button
+  1228→                onClick={() => onStartDownload(item)}
+  1229→                className="px-4 py-2 rounded-xl bg-secondary text-on-secondary font-bold text-body-sm flex items-center gap-1.5 hover:scale-105 transition-all cursor-pointer shadow-md shrink-0"
+  1230→              >
+  1231→                <span className="material-symbols-outlined text-[18px]">download_for_offline</span>
+  1232→                <span>
+  1233→                  Télécharger ({item.fileSizeMB ? `${(item.fileSizeMB / 1024).toFixed(1)} Go` : "HD"})
+  1234→                </span>
+  1235→              </button>
+  1236→            </div>
+  1237→
+  1238→            {/* ========================================================= */}
+  1239→            {/* 4. Info section — poster + metadata + synopsis            */}
+  1240→            {/* ========================================================= */}
+  1241→            <div className="flex flex-col md:flex-row gap-6 items-start">
+  1242→              <div className="w-32 sm:w-36 h-48 sm:h-52 rounded-xl overflow-hidden shadow-lg shrink-0 border border-outline-variant/15 relative">
+  1243→                <img
+  1244→                  src={item.imageUrl}
+  1245→                  alt={item.title}
+  1246→                  referrerPolicy="no-referrer"
+  1247→                  className="w-full h-full object-cover"
+  1248→                  onError={(e) => {
+  1249→                    (e.currentTarget as HTMLElement).style.display = "none";
+  1250→                  }}
+  1251→                />
+  1252→                <span className="absolute bottom-2 left-2 bg-primary text-on-primary text-[10px] font-bold px-1.5 py-0.5 rounded">
+  1253→                  {item.quality}
+  1254→                </span>
+  1255→              </div>
+  1256→
+  1257→              <div className="flex-1 space-y-2.5 min-w-0">
+  1258→                <div className="flex items-center gap-2 flex-wrap">
+  1259→                  <span className="bg-primary/20 text-primary text-[11px] font-bold px-2 py-0.5 rounded">
+  1260→                    {item.platform}
+  1261→                  </span>
+  1262→                  <span className="text-outline text-body-sm">•</span>
+  1263→                  <span className="text-on-surface-variant text-body-sm">{item.category}</span>
+  1264→                  {item.duration && (
+  1265→                    <>
+  1266→                      <span className="text-outline text-body-sm">•</span>
+  1267→                      <span className="text-on-surface-variant text-body-sm">{item.duration}</span>
+  1268→                    </>
+  1269→                  )}
+  1270→                  <span className="text-outline text-body-sm">•</span>
+  1271→                  <span className="text-secondary text-body-sm font-semibold flex items-center gap-1">
+  1272→                    <span
+  1273→                      className="material-symbols-outlined text-[14px]"
+  1274→                      style={{ fontVariationSettings: "'FILL' 1" }}
+  1275→                    >
+  1276→                      star
+  1277→                    </span>
+  1278→                    Note : {item.rating || "9.0"}/10
+  1279→                  </span>
+  1280→                  {item.releaseYear && (
+  1281→                    <>
+  1282→                      <span className="text-outline text-body-sm">•</span>
+  1283→                      <span className="text-on-surface-variant text-body-sm font-mono">
+  1284→                        {item.releaseYear}
+  1285→                      </span>
+  1286→                    </>
+  1287→                  )}
+  1288→                </div>
+  1289→
+  1290→                <h2 className="text-headline-md font-headline-md text-on-surface text-[20px] sm:text-[22px]">
+  1291→                  {item.title}
+  1292→                </h2>
+  1293→
+  1294→                {/* Genres / tags */}
+  1295→                {item.tags && item.tags.length > 0 && (
+  1296→                  <div className="flex items-center gap-1.5 flex-wrap">
+  1297→                    {item.tags.slice(0, 6).map((tag) => (
+  1298→                      <span
+  1299→                        key={tag}
+  1300→                        className="text-[11px] px-2 py-0.5 rounded-full bg-surface-container-high text-on-surface-variant border border-outline-variant/15"
+  1301→                      >
+  1302→                        {tag}
+  1303→                      </span>
+  1304→                    ))}
+  1305→                  </div>
+  1306→                )}
+  1307→
+  1308→                {item.director && (
+  1309→                  <p className="text-[12px] text-outline font-medium">
+  1310→                    Réalisé par <span className="text-on-surface">{item.director}</span>
+  1311→                    {item.actors && item.actors.length > 0 && (
+  1312→                      <>
+  1313→                        {" "}
+  1314→                        • Avec <span className="text-on-surface">
+  1315→                          {item.actors.slice(0, 3).join(", ")}
+  1316→                        </span>
+  1317→                      </>
+  1318→                    )}
+  1319→                  </p>
+  1320→                )}
+  1321→
+  1322→                {item.description && (
+  1323→                  <p className="text-body-md text-on-surface-variant leading-relaxed">
+  1324→                    {item.description}
+  1325→                  </p>
+  1326→                )}
+  1327→
+  1328→                {/* uBlock Protection Banner */}
+  1329→                <div className="p-3 bg-surface-container rounded-xl border border-secondary/25 flex items-center justify-between gap-3 text-body-sm text-secondary">
+  1330→                  <div className="flex items-center gap-2">
+  1331→                    <span
+  1332→                      className="material-symbols-outlined text-[20px]"
+  1333→                      style={{ fontVariationSettings: "'FILL' 1" }}
+  1334→                    >
+  1335→                      security
+  1336→                    </span>
+  1337→                    <span>
+  1338→                      <strong>Protection guymaTV & uBlock :</strong> Les pop-ups et fenêtres
+  1339→                      adultes du site d'origine ont été filtrés.
+  1340→                    </span>
+  1341→                  </div>
+  1342→                  <button
+  1343→                    onClick={() => setShowUBlockModal(true)}
+  1344→                    className="text-[11px] font-bold text-primary hover:underline shrink-0 cursor-pointer"
+  1345→                  >
+  1346→                    Inspecter uBlock
+  1347→                  </button>
+  1348→                </div>
+  1349→              </div>
+  1350→            </div>
+  1351→
+  1352→            {/* ========================================================= */}
+  1353→            {/* 5. Series episodes section (only if series)               */}
+  1354→            {/* ========================================================= */}
+  1355→            {isSeries && (
+  1356→              <div className="bg-surface-container rounded-xl p-3.5 border border-outline-variant/15 space-y-3">
+  1357→                <div className="flex items-center justify-between flex-wrap gap-2">
+  1358→                  <span className="text-body-sm font-bold text-primary flex items-center gap-1.5">
+  1359→                    <span className="material-symbols-outlined text-[18px]">subscriptions</span>
+  1360→                    <span>Épisodes</span>
+  1361→                  </span>
+  1362→                  <span className="text-[11px] text-outline flex items-center gap-1">
+  1363→                    <span className="material-symbols-outlined text-[12px]">volume_up</span>
+  1364→                    Version Française (VF) uniquement
+  1365→                  </span>
+  1366→                </div>
+  1367→
+  1368→                {seriesLoading ? (
+  1369→                  <div className="flex flex-col items-center justify-center py-8 gap-3">
+  1370→                    <div className="w-8 h-8 border-4 border-primary/30 border-t-primary rounded-full animate-spin" />
+  1371→                    <p className="text-body-sm text-on-surface-variant">
+  1372→                      Chargement des épisodes...
+  1373→                    </p>
+  1374→                  </div>
+  1375→                ) : !seriesStructure ? (
+  1376→                  <div className="text-center py-6 text-on-surface-variant text-body-sm">
+  1377→                    <span className="material-symbols-outlined text-[28px] text-outline mb-1 inline-block">
+  1378→                      error
+  1379→                    </span>
+  1380→                    <p>Impossible de charger la structure des épisodes.</p>
+  1381→                  </div>
+  1382→                ) : seriesStructure.seasons.length === 0 && seasonEpisodes.length === 0 ? (
+  1383→                  <div className="text-center py-6 text-on-surface-variant text-body-sm">
+  1384→                    <span className="material-symbols-outlined text-[28px] text-outline mb-1 inline-block">
+  1385→                      info
+  1386→                    </span>
+  1387→                    <p>Aucun épisode VF disponible pour le moment.</p>
+  1388→                  </div>
+  1389→                ) : (
+  1390→                  <>
+  1391→                    {/* Season selector (horizontal tabs) */}
+  1392→                    {seriesStructure.seasons.length > 0 && (
+  1393→                      <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-none">
+  1394→                        {seriesStructure.seasons.map((season) => {
+  1395→                          const isActive = selectedSeason === season.seasonNumber;
+  1396→                          return (
+  1397→                            <button
+  1398→                              key={season.seasonNumber}
+  1399→                              onClick={() => handleSelectSeason(season.seasonNumber)}
+  1400→                              className={`px-3 py-2 rounded-lg text-body-sm font-semibold shrink-0 transition-all cursor-pointer border flex items-center gap-1.5 ${
+  1401→                                isActive
+  1402→                                  ? "bg-primary text-on-primary border-primary font-bold shadow-sm"
+  1403→                                  : "bg-surface-container-high border-outline-variant/15 text-on-surface-variant hover:text-on-surface"
+  1404→                              }`}
+  1405→                            >
+  1406→                              <span className="material-symbols-outlined text-[14px]">tv</span>
+  1407→                              <span>Saison {season.seasonNumber}</span>
+  1408→                              <span className="text-[10px] opacity-80 font-normal">
+  1409→                                ({season.episodesCount})
+  1410→                              </span>
+  1411→                            </button>
+  1412→                          );
+  1413→                        })}
+  1414→                      </div>
+  1415→                    )}
+  1416→
+  1417→                    {/* Episode list (vertical, scrollable, max-h-96) */}
+  1418→                    <div className="max-h-96 overflow-y-auto space-y-1.5 guyma-scroll pr-1">
+  1419→                      {seasonEpisodes.length === 0 ? (
+  1420→                        <div className="text-center py-4 text-on-surface-variant text-body-sm">
+  1421→                          Aucun épisode VF pour cette saison.
+  1422→                        </div>
+  1423→                      ) : (
+  1424→                        seasonEpisodes.map((ep) => {
+  1425→                          const isSelected =
+  1426→                            selectedEpisode?.id === ep.id;
+  1427→                          return (
+  1428→                            <button
+  1429→                              key={ep.id}
+  1430→                              onClick={() => handleSelectEpisode(ep)}
+  1431→                              className={`w-full flex items-start gap-3 p-2.5 rounded-lg text-left transition-all cursor-pointer border ${
+  1432→                                isSelected
+  1433→                                  ? "bg-primary/15 border-primary/40"
+  1434→                                  : "bg-surface-container-low border-outline-variant/10 hover:bg-surface-container-high"
+  1435→                              }`}
+  1436→                            >
+  1437→                              {/* Episode number badge */}
+  1438→                              <div
+  1439→                                className={`w-10 h-10 rounded-lg flex items-center justify-center font-bold text-body-sm shrink-0 ${
+  1440→                                  isSelected
+  1441→                                    ? "bg-primary text-on-primary"
+  1442→                                    : "bg-surface-container-highest text-on-surface"
+  1443→                                }`}
+  1444→                              >
+  1445→                                {ep.episodeNumber}
+  1446→                              </div>
+  1447→
+  1448→                              {/* Episode info */}
+  1449→                              <div className="flex-1 min-w-0">
+  1450→                                <div className="flex items-center justify-between gap-2">
+  1451→                                  <span className="font-headline-sm text-body-sm text-on-surface truncate">
+  1452→                                    {ep.title || `Épisode ${ep.episodeNumber}`}
+  1453→                                  </span>
+  1454→                                  {ep.duration && (
+  1455→                                    <span className="text-label-sm text-outline shrink-0 flex items-center gap-0.5">
+  1456→                                      <span className="material-symbols-outlined text-[12px]">
+  1457→                                        schedule
+  1458→                                      </span>
+  1459→                                      {ep.duration}
+  1460→                                    </span>
+  1461→                                  )}
+  1462→                                </div>
+  1463→                                {ep.synopsis && (
+  1464→                                  <p className="text-label-md text-on-surface-variant mt-0.5 line-clamp-2">
+  1465→                                    {ep.synopsis}
+  1466→                                  </p>
+  1467→                                )}
+  1468→                                <div className="flex items-center gap-2 mt-1">
+  1469→                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-secondary/15 text-secondary font-bold">
+  1470→                                    VF
+  1471→                                  </span>
+  1472→                                  {isSelected && (
+  1473→                                    <span className="text-[10px] text-primary font-bold flex items-center gap-0.5">
+  1474→                                      <span
+  1475→                                        className="material-symbols-outlined text-[12px]"
+  1476→                                        style={{ fontVariationSettings: "'FILL' 1" }}
+  1477→                                      >
+  1478→                                        play_circle
+  1479→                                      </span>
+  1480→                                      En lecture
+  1481→                                    </span>
+  1482→                                  )}
+  1483→                                </div>
+  1484→                              </div>
+  1485→
+  1486→                              {/* Play icon */}
+  1487→                              <span
+  1488→                                className={`material-symbols-outlined text-[24px] shrink-0 ${
+  1489→                                  isSelected ? "text-primary" : "text-outline"
+  1490→                                }`}
+  1491→                              >
+  1492→                                {isSelected ? "pause_circle" : "play_circle"}
+  1493→                              </span>
+  1494→                            </button>
+  1495→                          );
+  1496→                        })
+  1497→                      )}
+  1498→                    </div>
+  1499→                  </>
+  1500→                )}
+  1501→              </div>
+  1502→            )}
+  1503→
+  1504→            {/* ========================================================= */}
+  1505→            {/* 6. Comments & reviews section (always show)               */}
+  1506→            {/* ========================================================= */}
+  1507→            <div className="bg-surface-container rounded-xl p-4 border border-outline-variant/15 space-y-4">
+  1508→              {/* Header */}
+  1509→              <div className="flex items-center justify-between flex-wrap gap-2">
+  1510→                <div className="flex items-center gap-2">
+  1511→                  <span className="material-symbols-outlined text-primary text-[20px]">
+  1512→                    reviews
+  1513→                  </span>
+  1514→                  <h3 className="font-headline-sm text-body-md text-on-surface">
+  1515→                    Commentaires & Avis
+  1516→                  </h3>
+  1517→                </div>
+  1518→                {averageRating > 0 && (
+  1519→                  <div className="flex items-center gap-2">
+  1520→                    <StarRow rating={averageRating} size={16} />
+  1521→                    <span className="text-body-sm text-on-surface font-bold">
+  1522→                      {averageRating.toFixed(1)}/5
+  1523→                    </span>
+  1524→                    <span className="text-label-sm text-on-surface-variant">
+  1525→                      ({comments.length} avis)
+  1526→                    </span>
+  1527→                  </div>
+  1528→                )}
+  1529→              </div>
+  1530→
+  1531→              {/* Add comment form */}
+  1532→              <div className="bg-surface-container-low rounded-lg p-3 space-y-3 border border-outline-variant/10">
+  1533→                {/* Name input + rating selector */}
+  1534→                <div className="flex items-center gap-3 flex-wrap">
+  1535→                  <input
+  1536→                    value={newCommentName}
+  1537→                    onChange={(e) => setNewCommentName(e.target.value)}
+  1538→                    placeholder="Votre nom (optionnel)"
+  1539→                    className="flex-1 min-w-[180px] h-9 px-3 bg-surface-container text-on-surface text-body-sm rounded-lg outline-none focus:ring-2 focus:ring-primary border border-outline-variant/20"
+  1540→                  />
+  1541→                  <div className="flex items-center gap-2">
+  1542→                    <span className="text-label-sm text-on-surface-variant">Note :</span>
+  1543→                    <div className="flex gap-0.5">
+  1544→                      {[1, 2, 3, 4, 5].map((i) => (
+  1545→                        <button
+  1546→                          key={i}
+  1547→                          onClick={() => setNewCommentRating(i)}
+  1548→                          onMouseEnter={() => setHoverRating(i)}
+  1549→                          onMouseLeave={() => setHoverRating(0)}
+  1550→                          className="cursor-pointer p-0.5"
+  1551→                          title={`${i} étoile${i > 1 ? "s" : ""}`}
+  1552→                        >
+  1553→                          <span
+  1554→                            className="material-symbols-outlined text-secondary text-[20px]"
+  1555→                            style={{
+  1556→                              fontVariationSettings:
+  1557→                                i <= (hoverRating || newCommentRating) ? "'FILL' 1" : undefined,
+  1558→                              opacity: i <= (hoverRating || newCommentRating) ? 1 : 0.3,
+  1559→                            }}
+  1560→                          >
+  1561→                            star
+  1562→                          </span>
+  1563→                        </button>
+  1564→                      ))}
+  1565→                    </div>
+  1566→                  </div>
+  1567→                </div>
+  1568→
+  1569→                {/* Comment textarea */}
+  1570→                <textarea
+  1571→                  value={newCommentContent}
+  1572→                  onChange={(e) => setNewCommentContent(e.target.value)}
+  1573→                  placeholder="Partagez votre avis sur ce film..."
+  1574→                  rows={3}
+  1575→                  className="w-full p-3 bg-surface-container text-on-surface text-body-sm rounded-lg outline-none focus:ring-2 focus:ring-primary border border-outline-variant/20 resize-y"
+  1576→                />
+  1577→
+  1578→                {/* Submit button */}
+  1579→                <div className="flex justify-end">
+  1580→                  <button
+  1581→                    onClick={handleSubmitComment}
+  1582→                    disabled={!newCommentContent.trim() || submittingComment}
+  1583→                    className="px-4 py-2 rounded-xl bg-primary text-on-primary text-body-sm font-bold flex items-center gap-1.5 hover:scale-105 transition-transform cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100"
+  1584→                  >
+  1585→                    <span className="material-symbols-outlined text-[16px]">send</span>
+  1586→                    {submittingComment ? "Publication…" : "Publier"}
+  1587→                  </button>
+  1588→                </div>
+  1589→              </div>
+  1590→
+  1591→              {/* Comments list */}
+  1592→              {commentsLoading ? (
+  1593→                <div className="flex items-center justify-center gap-2 py-6 text-on-surface-variant text-body-sm">
+  1594→                  <div className="w-5 h-5 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
+  1595→                  Chargement des commentaires...
+  1596→                </div>
+  1597→              ) : comments.length === 0 ? (
+  1598→                <div className="text-center py-6 text-on-surface-variant">
+  1599→                  <span className="material-symbols-outlined text-[36px] text-outline mb-2 inline-block">
+  1600→                    forum
+  1601→                  </span>
+  1602→                  <p className="text-body-sm">Soyez le premier à laisser un avis</p>
+  1603→                </div>
+  1604→              ) : (
+  1605→                <div className="space-y-3">
+  1606→                  {comments.map((comment) => (
+  1607→                    <CommentItem
+  1608→                      key={comment.id}
+  1609→                      comment={comment}
+  1610→                      replyingTo={replyingTo}
+  1611→                      onToggleReply={handleToggleReply}
+  1612→                      onSubmitReply={handleReplySubmit}
+  1613→                      onDelete={handleDeleteComment}
+  1614→                    />
+  1615→                  ))}
+  1616→                </div>
+  1617→              )}
+  1618→            </div>
+  1619→          </div>
+  1620→        </div>
+  1621→      </div>
+  1622→
+  1623→      {/* uBlock Origin Interactive Modal */}
+  1624→      {showUBlockModal && (
+  1625→        <UBlockModal
+  1626→          onClose={() => setShowUBlockModal(false)}
+  1627→          currentPageDomain={domain}
+  1628→        />
+  1629→      )}
+  1630→    </div>
+  1631→  );
+  1632→};
+  1633→

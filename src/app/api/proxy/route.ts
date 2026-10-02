@@ -13,7 +13,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import * as cheerio from "cheerio";
-import { BASE_URL } from "@/lib/scraper";
+// BASE_URL is no longer needed — the proxy resolves the domain dynamically.
 
 export const dynamic = "force-dynamic";
 
@@ -98,9 +98,9 @@ function isBlocked(url: string): boolean {
 }
 
 /**
- * Rewrite a relative URL to absolute, pointing through our proxy when needed.
+ * Rewrite a relative URL to absolute, pointing to the source domain.
  */
-function rewriteUrl(url: string, currentPageId: string): string {
+function rewriteUrl(url: string, sourceDomain: string): string {
   if (!url) return url;
   // Don't rewrite data: URLs, anchors, javascript:, mailto:
   if (
@@ -114,9 +114,9 @@ function rewriteUrl(url: string, currentPageId: string): string {
   }
   // Blocked → return empty (will be filtered)
   if (isBlocked(url)) return "";
-  // Make relative URLs absolute against the source
+  // Make relative URLs absolute against the source domain that responded
   if (url.startsWith("//")) return `https:${url}`;
-  if (url.startsWith("/")) return `${BASE_URL}${url}`;
+  if (url.startsWith("/")) return `${sourceDomain}${url}`;
   return url;
 }
 
@@ -124,31 +124,53 @@ export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
     const pageId = searchParams.get("page");
+    const season = searchParams.get("season");
+    const episode = searchParams.get("episode");
     if (!pageId) {
       return new NextResponse("Missing page parameter", { status: 400 });
     }
 
-    const targetUrl = `${BASE_URL}/index.php?newsid=${encodeURIComponent(pageId)}`;
+    // The source site is available on multiple mirror domains. We try each
+    // one until it responds. The proxy preserves the source site's native
+    // player interface (server tabs, quality selector, episode list) — we
+    // only strip ads, popups, trackers, and adult content.
+    const SOURCE_DOMAINS = [
+      "https://french-stream.net",
+      "https://french-stream.one",
+    ];
 
-    const res = await fetch(targetUrl, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-        "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        Referer: BASE_URL,
-      },
-    });
+    const targetPath = `/index.php?newsid=${encodeURIComponent(pageId)}`;
+    let html: string | null = null;
+    let usedDomain: string | null = null;
 
-    if (!res.ok) {
-      return new NextResponse(
-        `<html><body style="background:#0f1412;color:#dfe4e0;font-family:sans-serif;padding:40px;text-align:center"><h2>Contenu temporairement indisponible</h2><p>Code: ${res.status}</p></body></html>`,
-        { status: res.status, headers: { "Content-Type": "text/html; charset=utf-8" } }
-      );
+    for (const domain of SOURCE_DOMAINS) {
+      try {
+        const res = await fetch(`${domain}${targetPath}`, {
+          headers: {
+            "User-Agent":
+              "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+            "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+            Accept:
+              "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            Referer: domain,
+          },
+        });
+        if (res.ok) {
+          html = await res.text();
+          usedDomain = domain;
+          break;
+        }
+      } catch {
+        // Try next domain
+      }
     }
 
-    const html = await res.text();
+    if (!html || !usedDomain) {
+      return new NextResponse(
+        `<html><body style="background:#0f1412;color:#dfe4e0;font-family:sans-serif;padding:40px;text-align:center"><h2>Contenu temporairement indisponible</h2><p>Tous les miroirs français-stream ne répondent pas.</p></body></html>`,
+        { status: 502, headers: { "Content-Type": "text/html; charset=utf-8" } }
+      );
+    }
     const $ = cheerio.load(html);
 
     // === 1. REMOVE ALL AD / TRACKER / POPUP ELEMENTS ===
@@ -324,7 +346,7 @@ export async function GET(req: NextRequest) {
                   : "src";
         const val = $(el).attr(attr);
         if (val) {
-          const rewritten = rewriteUrl(val, pageId);
+          const rewritten = rewriteUrl(val, usedDomain);
           if (rewritten === "") {
             $(el).remove();
           } else {
@@ -378,7 +400,7 @@ iframe {
 
     // Add a base tag so relative URLs resolve to the source
     if ($("base").length === 0) {
-      $("head").prepend(`<base href="${BASE_URL}/">`);
+      $("head").prepend(`<base href="${usedDomain}/">`);
     }
 
     // === 5. ADD X-Frame-ALLOWING HEADERS (we're serving our own filtered HTML) ===
