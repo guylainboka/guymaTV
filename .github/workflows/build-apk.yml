@@ -130,24 +130,20 @@ jobs:
       - name: 🔧 Configure Android for cleartext + WebView
         run: |
           mkdir -p android/app/src/main/xml
-          cat > android/app/src/main/xml/network_security_config.xml << 'XML'
-<?xml version="1.0" encoding="utf-8"?>
-<network-security-config>
-    <base-config cleartextTrafficPermitted="true">
-        <trust-anchors>
-            <certificates src="system" />
-        </trust-anchors>
-    </base-config>
-</network-security-config>
-XML
-          # Add the network security config to the AndroidManifest
+          printf '%s\n' \
+            '<?xml version="1.0" encoding="utf-8"?>' \
+            '<network-security-config>' \
+            '    <base-config cleartextTrafficPermitted="true">' \
+            '        <trust-anchors>' \
+            '            <certificates src="system" />' \
+            '        </trust-anchors>' \
+            '    </base-config>' \
+            '</network-security-config>' \
+            > android/app/src/main/xml/network_security_config.xml
           sed -i 's|<application|<application android:networkSecurityConfig="@xml/network_security_config"|' \
             android/app/src/main/AndroidManifest.xml
-          # Verify the file was created
           echo "=== network_security_config.xml ==="
           cat android/app/src/main/xml/network_security_config.xml
-          echo "=== AndroidManifest.xml (first 10 lines) ==="
-          head -10 android/app/src/main/AndroidManifest.xml
 
       - name: 🔨 Build Debug APK
         if: steps.buildtype.outputs.build_type == 'debug' || steps.buildtype.outputs.build_type == 'both'
