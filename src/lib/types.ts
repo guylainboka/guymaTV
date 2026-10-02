@@ -6,6 +6,7 @@
 export type TabType =
   | "accueil"
   | "explorer"
+  | "plateformes"
   | "favoris"
   | "telechargements"
   | "parametres";

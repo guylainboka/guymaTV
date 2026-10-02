@@ -21,6 +21,9 @@ import { UpgradeScreen } from "./UpgradeScreen";
 import { SecureBrowserModal } from "./SecureBrowserModal";
 import { UBlockModal } from "./UBlockModal";
 import { InfoModal } from "./InfoModal";
+import { BridgeScreen } from "./BridgeScreen";
+import { BridgeModal } from "./BridgeModal";
+import { BridgePlatform } from "@/lib/bridge-platforms";
 import { apiUrl } from "@/lib/api-client";
 
 const INITIAL_USER_SETTINGS: UserSettings = {
@@ -67,6 +70,9 @@ export default function GuymaApp() {
   const [downloads, setDownloads] = useState<DownloadItem[]>([]);
 
   const [activeItem, setActiveItem] = useState<StreamItem | null>(null);
+  // Bridge modal: when set, BridgeModal opens full-screen with the platform
+  // loaded via /api/bridge (X-Frame-Options stripped).
+  const [activePlatform, setActivePlatform] = useState<BridgePlatform | null>(null);
   const [modalInfo, setModalInfo] = useState<{ title: string; content: string } | null>(
     null
   );
@@ -482,6 +488,8 @@ export default function GuymaApp() {
             services={services}
             initialSearch={explorerSearch}
           />
+        ) : currentTab === "plateformes" ? (
+          <BridgeScreen onSelectPlatform={(p) => setActivePlatform(p)} />
         ) : currentTab === "favoris" ? (
           <FavorisScreen
             favorites={favoriteItems}
@@ -545,6 +553,14 @@ export default function GuymaApp() {
           title={modalInfo.title}
           content={modalInfo.content}
           onClose={() => setModalInfo(null)}
+        />
+      )}
+
+      {/* Bridge Modal — full-screen legal platform iframe (France.tv, Arte, …) */}
+      {activePlatform && (
+        <BridgeModal
+          platform={activePlatform}
+          onClose={() => setActivePlatform(null)}
         />
       )}
     </div>

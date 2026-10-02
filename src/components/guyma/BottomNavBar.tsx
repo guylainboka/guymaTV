@@ -19,6 +19,7 @@ export const BottomNavBar: React.FC<BottomNavBarProps> = ({
   const tabs: { id: TabType; label: string; icon: string }[] = [
     { id: "accueil", label: "Accueil", icon: "home" },
     { id: "explorer", label: "Explorer", icon: "explore" },
+    { id: "plateformes", label: "TV", icon: "live_tv" },
     { id: "favoris", label: "Favoris", icon: "favorite" },
     { id: "telechargements", label: "Offline", icon: "download" },
     { id: "parametres", label: "Réglages", icon: "settings" },
@@ -33,14 +34,14 @@ export const BottomNavBar: React.FC<BottomNavBarProps> = ({
             <button
               key={tab.id}
               onClick={() => onTabChange(tab.id)}
-              className={`flex flex-col items-center justify-center gap-space-xs w-14 h-14 rounded-full transition-all cursor-pointer relative ${
+              className={`flex flex-col items-center justify-center gap-space-xs w-12 sm:w-14 h-14 rounded-full transition-all cursor-pointer relative ${
                 isActive
                   ? "text-primary bg-primary-container/10 scale-105"
                   : "text-on-surface-variant hover:text-on-surface"
               }`}
             >
               <span
-                className="material-symbols-outlined transition-transform active:scale-90 text-[22px]"
+                className="material-symbols-outlined transition-transform active:scale-90 text-[20px] sm:text-[22px]"
                 style={isActive ? { fontVariationSettings: "'FILL' 1" } : undefined}
               >
                 {tab.icon}

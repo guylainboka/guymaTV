@@ -528,3 +528,61 @@ Stage Summary:
   * Integration is feasible as a second entry in src/lib/streaming-servers.ts, reusing the existing /api/proxy iframe pattern. Phase 1 (1-2 days): registry + scraper + proxy source + Explorer tab. Phase 2 (1 day): enrich cards from __NUXT_DATA__, language selector, Premium badge.
 - CAN integrate the FREE content: YES, with caveats (no global search, no URL filters, 360p-only free quality, first-2-episodes-only for series).
 - URL patterns discovered: home=/fr, movies=/fr/web/movie, series=/fr/web/tv-series, anime=/fr/web/animated-series, midnight=/fr/web/midnight, ranking=/fr/ranking-list, detail=/fr/moviedetail/{slug}-{hash} (movies AND series same route). NO search URL, NO genre/country/year URLs.
+
+
+---
+Task ID: 13-bridge-ui
+Agent: full-stack-developer
+Task: Implement the guymaTV "bridge" / "gateway" UI for legal free streaming platforms (France.tv, Arte, Pluto TV, etc.). Users access real legal platforms from guymaTV via a new "TV & Plateformes" tab + full-screen iframe served through the existing /api/bridge proxy (X-Frame-Options stripped). guymaTV keeps only its slim top bar around the iframe.
+
+Work Log:
+- Read worklog.md (project context: guymaTV porting from Vite to Next.js 16, Material 3 olive/emerald theme, scraping french-stream.net, no IA, no mock data).
+- Read existing files: src/lib/types.ts (TabType union), src/lib/bridge-platforms.ts (BRIDGE_PLATFORMS registry + helpers, 14 legal platforms), src/lib/api-client.ts (apiUrl helper), src/components/guyma/GuymaApp.tsx (orchestrator), src/components/guyma/Header.tsx (desktop nav), src/components/guyma/BottomNavBar.tsx (mobile nav), src/app/api/bridge/route.ts (existing proxy that strips X-Frame-Options + injects <base> tag + whitelists BRIDGE_PLATFORMS hosts), src/app/globals.css (Material 3 theme tokens + spacing scale).
+- Confirmed dev server is running cleanly (no compile errors) by reading /home/z/my-project/dev.log.
+
+- PART 1 — Updated src/lib/types.ts: added 'plateformes' to the TabType union (placed between 'explorer' and 'favoris' to match the desired nav order).
+
+- PART 2 — Created src/components/guyma/BridgeScreen.tsx:
+  * "use client" at top, imports BRIDGE_PLATFORMS / CATEGORY_LABELS / getPlatformsByCategory / BridgePlatform type from @/lib/bridge-platforms.
+  * Interface BridgeScreenProps { onSelectPlatform: (platform: BridgePlatform) => void }.
+  * Page header: large rounded-2xl icon box (live_tv, FILL 1) + h1 "TV & Plateformes Légales" (font-headline-lg) + subtitle (text-body-md, text-on-surface-variant) + info banner ("guymaTV agit comme une passerelle…") with secondary color accent.
+  * Defined CATEGORY_ORDER constant (tv-replay → live-tv → vod → anime → docs → sport) so sections render in a sensible order.
+  * Iterates CATEGORY_LABELS via the CATEGORY_ORDER array; for each category: section header (icon + label + count badge) + responsive grid of PlatformTile components (grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6, gap-space-md).
+  * PlatformTile component: clickable <button> with rounded-2xl bg-surface-container border border-outline-variant/20 shadow-md hover:shadow-xl p-space-md, hover:-translate-y-1 + hover:border-primary/30. Top-right "Légal" badge (bg-primary/20 text-primary border-primary/30, verified icon FILL 1). Colored icon circle (uses platform.color as backgroundColor at 22 alpha, color, border at 44 alpha) containing the platform's Material Symbols icon at FILL 1, 32px. Platform name (font-headline-sm, line-clamp-1). Description (text-body-sm text-on-surface-variant, line-clamp-2). Bottom: "Accéder" pill button (bg-primary text-on-primary, open_in_new icon) + "via proxy" hint (shield icon, text-outline) when platform.needsProxy is true.
+  * Footer note: total platform count + source attribution (journaldugeek.com).
+
+- PART 3 — Created src/components/guyma/BridgeModal.tsx:
+  * "use client" at top, imports BridgePlatform type from @/lib/bridge-platforms, apiUrl from @/lib/api-client.
+  * Interface BridgeModalProps { platform: BridgePlatform; onClose: () => void }.
+  * Root div: fixed inset-0 z-50 bg-[#0f1412] flex flex-col (full-screen overlay, no padding).
+  * Top bar (h-14, shrink-0, bg-surface/95 backdrop-blur-xl border-b border-outline-variant/25, role="toolbar"):
+    - Left: "guymaTV" logo (font-headline-md text-primary) + chevron_right icon + platform icon (small colored chip using platform.color) + platform name (font-headline-sm text-on-surface, truncate).
+    - Center (hidden on mobile, md:flex): URL display pill ("via guymaTV • {platform.url}", link icon, max-w-[40%], truncate).
+    - Right: "Légal" badge (hidden on mobile, sm:inline-flex) + 3 action buttons (refresh, open_in_new, close) — all w-9 h-9 rounded-full hover:bg-surface-container flex items-center justify-center. Close button has hover:bg-error-container/30 for visual emphasis.
+  * Iframe container (relative flex-1 bg-[#0f1412] overflow-hidden):
+    - Loading overlay (absolute inset-0 z-10, pointer-events-none): spinner ring (border-t-primary animate-spin) wrapping a colored chip with platform.icon at FILL 1 + "Chargement de {platform.name}…" (font-headline-sm text-on-surface) + "via le proxy guymaTV • sans pub" subtitle.
+    - iframe: key={reloadKey} (so refresh remounts it), src=apiUrl("/api/bridge?url=" + encodeURIComponent(platform.url)), onLoad → setLoading(false), className="w-full h-full border-0 bg-[#0f1412]", sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-presentation", allow="autoplay; fullscreen; encrypted-media; picture-in-picture", referrerPolicy="no-referrer-when-downgrade", title=`${platform.name} — via guymaTV`.
+  * Refresh handler: bumps reloadKey state → iframe remounts → loading overlay reappears until onLoad.
+  * Open-in-new handler: window.open(platform.url, "_blank", "noopener,noreferrer").
+  * Keyboard: useEffect adds a keydown listener; Escape → preventDefault + stopPropagation + onClose. Also locks body scroll (document.body.style.overflow = "hidden") while modal is open, restores previous value on cleanup.
+  * No bottom bar — the platform's own footer/navigation lives inside the iframe, as specified.
+
+- PART 4 — Wired into existing navigation:
+  * src/components/guyma/GuymaApp.tsx: added imports (BridgeScreen, BridgeModal, BridgePlatform type) + new state (activePlatform: BridgePlatform | null) + new case in the main content switch (`currentTab === "plateformes"` → renders BridgeScreen with onSelectPlatform={(p) => setActivePlatform(p)}) + new BridgeModal render at the bottom (with the other modals, driven by activePlatform).
+  * src/components/guyma/Header.tsx: added { id: "plateformes", label: "TV & Plateformes", icon: "live_tv" } to the desktop navTabs array (between "explorer" and "favoris"). Made the label responsive: renders "TV & Plateformes" on xl+ screens, "Plateformes" on md/lg screens (via hidden xl:inline + xl:hidden span pair).
+  * src/components/guyma/BottomNavBar.tsx: added { id: "plateformes", label: "TV", icon: "live_tv" } to the mobile tabs array (between "explorer" and "favoris"). Reduced tab button width from w-14 to w-12 sm:w-14 and icon size from text-[22px] to text-[20px] sm:text-[22px] so all 6 tabs fit comfortably on 320px-wide phones (6 × 48 = 288px < 320px).
+
+- Created /home/z/my-project/agent-ctx/ directory and wrote work record file: 13-bridge-ui-full-stack-developer.md (summary, files created, files updated, design constraints respected, API usage notes, dev server check, notes for future agents).
+
+Stage Summary:
+- Files created (2):
+  * src/components/guyma/BridgeScreen.tsx — platforms grid grouped by category
+  * src/components/guyma/BridgeModal.tsx — full-screen iframe overlay with slim guymaTV top bar
+- Files updated (4):
+  * src/lib/types.ts — added 'plateformes' to TabType
+  * src/components/guyma/GuymaApp.tsx — wired BridgeScreen (plateformes tab case) + BridgeModal (activePlatform state)
+  * src/components/guyma/Header.tsx — added "TV & Plateformes" / "Plateformes" nav button (live_tv icon)
+  * src/components/guyma/BottomNavBar.tsx — added "TV" nav button (live_tv icon) + adjusted sizing for 6-tab layout
+- Design system respected: Material 3 olive/emerald theme, Material Symbols Outlined icons (no Lucide, no shadcn/ui), typography utilities (font-headline-*, text-body-*), spacing utilities (space-*, px-margin, pb-safe), apiUrl() for the iframe src (so the APK build can re-point to a different backend).
+- iframe sandbox configured as: "allow-scripts allow-same-origin allow-forms allow-popups allow-presentation" — allow-same-origin is intentional so the platform's cookies/localStorage work (needed for France.tv / TF1+ logins). Security is enforced server-side by /api/bridge/route.ts's ALLOWED_HOSTS whitelist (derived from BRIDGE_PLATFORMS), so the iframe cannot be used to load arbitrary URLs.
+- Dev server log checked: no compile errors after the changes; Next.js hot-reloaded cleanly.

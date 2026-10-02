@@ -79,6 +79,7 @@ export const Header: React.FC<HeaderProps> = ({
   const navTabs: { id: TabType; label: string; icon: string }[] = [
     { id: "accueil", label: "Accueil", icon: "home" },
     { id: "explorer", label: "Explorer", icon: "explore" },
+    { id: "plateformes", label: "TV & Plateformes", icon: "live_tv" },
     { id: "favoris", label: "Favoris", icon: "favorite" },
     { id: "telechargements", label: "Téléchargements", icon: "download" },
     { id: "parametres", label: "Paramètres", icon: "settings" },
@@ -124,7 +125,16 @@ export const Header: React.FC<HeaderProps> = ({
                   >
                     {tab.icon}
                   </span>
-                  <span>{tab.label}</span>
+                  <span>
+                    {tab.id === "plateformes" ? (
+                      <>
+                        <span className="hidden xl:inline">{tab.label}</span>
+                        <span className="xl:hidden">Plateformes</span>
+                      </>
+                    ) : (
+                      tab.label
+                    )}
+                  </span>
                   {tab.id === "favoris" && favoritesCount > 0 && (
                     <span className="px-1.5 py-0.2 bg-primary text-on-primary text-[10px] font-bold rounded-full">
                       {favoritesCount}
