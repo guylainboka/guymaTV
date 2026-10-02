@@ -67,3 +67,13 @@ keystore.properties
 
 # Capacitor
 /ios/
+
+# guymaTV specific
+.env
+db/*.db
+db/*.db-journal
+upload/
+tool-results/
+.zscripts/
+guymaTV/
+agent-ctx/
