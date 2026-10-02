@@ -829,7 +829,8 @@ export async function getSeriesStructure(
         await page.waitForTimeout(1500);
       }
 
-      // Extract VF episodes (priority — user requested VF support)
+      // Extract ALL episodes — both VF and VOSTFR (user requested all versions).
+      // The app shows all available versions so the user can choose.
       const vfEpisodes: SeriesEpisode[] = await page
         .evaluate((sNum) => {
           const rows = document.querySelectorAll("#vf-episodes .episode-row, #vf-episodes [class*=ep]");
@@ -843,7 +844,7 @@ export async function getSeriesStructure(
             }
           });
           return eps.map((e) => ({
-            id: `s${sNum}e${e.n}`,
+            id: `s${sNum}e${e.n}-vf`,
             episodeNumber: e.n,
             seasonNumber: sNum,
             title: e.title,
@@ -854,41 +855,37 @@ export async function getSeriesStructure(
         }, season.seasonNumber)
         .catch(() => []);
 
-      // Extract VOSTFR episodes (fallback if no VF)
-      let vostfrEpisodes: SeriesEpisode[] = [];
-      if (vfEpisodes.length === 0) {
-        vostfrEpisodes = await page
-          .evaluate((sNum) => {
-            const rows = document.querySelectorAll("#vostfr-episodes .episode-row, #vostfr-episodes [class*=ep]");
-            const eps: { n: number; title: string; synopsis?: string }[] = [];
-            rows.forEach((r) => {
-              const title = r.querySelector(".ep-title")?.textContent?.trim() || r.textContent?.trim() || "";
-              const m = title.match(/Episode\s*(\d+)/i);
-              if (m) {
-                const synopsis = r.querySelector(".ep-info")?.textContent?.trim();
-                eps.push({ n: parseInt(m[1], 10), title, synopsis });
-              }
-            });
-            return eps.map((e) => ({
-              id: `s${sNum}e${e.n}`,
-              episodeNumber: e.n,
-              seasonNumber: sNum,
-              title: e.title,
-              videoUrl: "",
-              synopsis: e.synopsis,
-              language: "VOSTFR" as const,
-            }));
-          }, season.seasonNumber)
-          .catch(() => []);
-      }
+      // Also extract VOSTFR episodes (always — not just as fallback)
+      const vostfrEpisodes: SeriesEpisode[] = await page
+        .evaluate((sNum) => {
+          const rows = document.querySelectorAll("#vostfr-episodes .episode-row, #vostfr-episodes [class*=ep]");
+          const eps: { n: number; title: string; synopsis?: string }[] = [];
+          rows.forEach((r) => {
+            const title = r.querySelector(".ep-title")?.textContent?.trim() || r.textContent?.trim() || "";
+            const m = title.match(/Episode\s*(\d+)/i);
+            if (m) {
+              const synopsis = r.querySelector(".ep-info")?.textContent?.trim();
+              eps.push({ n: parseInt(m[1], 10), title, synopsis });
+            }
+          });
+          return eps.map((e) => ({
+            id: `s${sNum}e${e.n}-vostfr`,
+            episodeNumber: e.n,
+            seasonNumber: sNum,
+            title: e.title,
+            videoUrl: "",
+            synopsis: e.synopsis,
+            language: "VOSTFR" as const,
+          }));
+        }, season.seasonNumber)
+        .catch(() => []);
 
-      // Assign video URLs — each episode loads via our proxy with season/episode query
-      const chosenEpisodes = vfEpisodes.length > 0 ? vfEpisodes : vostfrEpisodes;
-      // Deduplicate by (seasonNumber, episodeNumber) — the source site sometimes
-      // renders the same episode row multiple times in #vf-episodes.
+      // Combine ALL episodes — VF + VOSTFR. Deduplicate by (seasonNumber, episodeNumber, language).
+      // The user can choose which version to watch in the UI.
+      const allVersionEpisodes = [...vfEpisodes, ...vostfrEpisodes];
       const seenKeys = new Set<string>();
-      const deduped = chosenEpisodes.filter((ep) => {
-        const key = `${ep.seasonNumber}-${ep.episodeNumber}`;
+      const deduped = allVersionEpisodes.filter((ep) => {
+        const key = `${ep.seasonNumber}-${ep.episodeNumber}-${ep.language}`;
         if (seenKeys.has(key)) return false;
         seenKeys.add(key);
         ep.videoUrl = `/api/proxy?page=${newsid}&season=${ep.seasonNumber}&episode=${ep.episodeNumber}`;

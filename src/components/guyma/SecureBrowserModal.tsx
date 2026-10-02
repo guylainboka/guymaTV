@@ -435,18 +435,13 @@ export const SecureBrowserModal: React.FC<SecureBrowserModalProps> = ({
   // =========================================================================
   // Series structure helpers
   // =========================================================================
-  // Filter to VF episodes (per user spec — focus on VF). Fall back to all
-  // episodes if no VF ones exist for this season.
-  const vfEpisodes = (seriesStructure?.episodes || []).filter(
-    (e) => e.language === "VF"
-  );
-  const allSeasonEpisodes = (seriesStructure?.episodes || []).filter(
+  // Show ALL episodes (VF + VOSTFR) — user requested all versions available.
+  // The UI shows a language badge (VF/VOSTFR) next to each episode so the
+  // user can choose which version to watch.
+  const allEpisodes = seriesStructure?.episodes || [];
+  const seasonEpisodes = allEpisodes.filter(
     (e) => e.seasonNumber === selectedSeason
   );
-  const seasonVfEpisodes = vfEpisodes.filter(
-    (e) => e.seasonNumber === selectedSeason
-  );
-  const seasonEpisodes = seasonVfEpisodes.length > 0 ? seasonVfEpisodes : allSeasonEpisodes;
 
   // =========================================================================
   // Comments handlers
@@ -903,7 +898,7 @@ export const SecureBrowserModal: React.FC<SecureBrowserModalProps> = ({
                   </span>
                   <span className="text-[11px] text-outline flex items-center gap-1">
                     <span className="material-symbols-outlined text-[12px]">volume_up</span>
-                    Version Française (VF) uniquement
+                    Toutes versions (VF + VOSTFR)
                   </span>
                 </div>
 
@@ -926,7 +921,7 @@ export const SecureBrowserModal: React.FC<SecureBrowserModalProps> = ({
                     <span className="material-symbols-outlined text-[28px] text-outline mb-1 inline-block">
                       info
                     </span>
-                    <p>Aucun épisode VF disponible pour le moment.</p>
+                    <p>Aucun épisode disponible pour le moment.</p>
                   </div>
                 ) : (
                   <>
@@ -960,7 +955,7 @@ export const SecureBrowserModal: React.FC<SecureBrowserModalProps> = ({
                     <div className="max-h-96 overflow-y-auto space-y-1.5 guyma-scroll pr-1">
                       {seasonEpisodes.length === 0 ? (
                         <div className="text-center py-4 text-on-surface-variant text-body-sm">
-                          Aucun épisode VF pour cette saison.
+                          Aucun épisode pour cette saison.
                         </div>
                       ) : (
                         seasonEpisodes.map((ep) => {
@@ -1008,8 +1003,14 @@ export const SecureBrowserModal: React.FC<SecureBrowserModalProps> = ({
                                   </p>
                                 )}
                                 <div className="flex items-center gap-2 mt-1">
-                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-secondary/15 text-secondary font-bold">
-                                    VF
+                                  <span
+                                    className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${
+                                      ep.language === "VOSTFR"
+                                        ? "bg-secondary/15 text-secondary"
+                                        : "bg-primary/15 text-primary"
+                                    }`}
+                                  >
+                                    {ep.language || "VF"}
                                   </span>
                                   {isSelected && (
                                     <span className="text-[10px] text-primary font-bold flex items-center gap-0.5">
