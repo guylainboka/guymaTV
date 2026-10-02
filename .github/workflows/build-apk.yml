@@ -129,7 +129,8 @@ jobs:
 
       - name: 🔧 Configure Android for cleartext + WebView
         run: |
-          mkdir -p android/app/src/main/xml
+          # Android resources MUST be in res/xml/ (not just xml/)
+          mkdir -p android/app/src/main/res/xml
           printf '%s\n' \
             '<?xml version="1.0" encoding="utf-8"?>' \
             '<network-security-config>' \
@@ -139,11 +140,11 @@ jobs:
             '        </trust-anchors>' \
             '    </base-config>' \
             '</network-security-config>' \
-            > android/app/src/main/xml/network_security_config.xml
+            > android/app/src/main/res/xml/network_security_config.xml
           sed -i 's|<application|<application android:networkSecurityConfig="@xml/network_security_config"|' \
             android/app/src/main/AndroidManifest.xml
-          echo "=== network_security_config.xml ==="
-          cat android/app/src/main/xml/network_security_config.xml
+          echo "=== Verify file ==="
+          cat android/app/src/main/res/xml/network_security_config.xml
 
       - name: 🔨 Build Debug APK
         if: steps.buildtype.outputs.build_type == 'debug' || steps.buildtype.outputs.build_type == 'both'
