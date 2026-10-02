@@ -1,6 +1,6 @@
 "use client";
 
-import React from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { TabType } from "@/lib/types";
 
 interface HeaderProps {
@@ -15,6 +15,12 @@ interface HeaderProps {
   onToggleTvMode?: () => void;
   favoritesCount?: number;
   downloadsCount?: number;
+  /**
+   * Functional search callback — fired when the user types in the header
+   * search input (debounced 500ms) or hits Enter. The parent should switch
+   * to the Explorer tab and forward the query to ExplorerScreen.
+   */
+  onSearch?: (query: string) => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -29,7 +35,47 @@ export const Header: React.FC<HeaderProps> = ({
   onToggleTvMode,
   favoritesCount = 0,
   downloadsCount = 0,
+  onSearch,
 }) => {
+  const [searchValue, setSearchValue] = useState("");
+  const [searchFocused, setSearchFocused] = useState(false);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Cleanup the debounce timer on unmount.
+  useEffect(() => {
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, []);
+
+  // Fire onSearch (debounced 500ms) every time the user types.
+  const handleSearchInput = (value: string) => {
+    setSearchValue(value);
+    if (!onSearch) return;
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      onSearch(value);
+    }, 500);
+  };
+
+  // Fire onSearch immediately when Enter is pressed.
+  const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (!onSearch) return;
+    if (e.key === "Enter") {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      onSearch(searchValue);
+    }
+  };
+
+  // Clear the search input.
+  const handleClearSearch = () => {
+    setSearchValue("");
+    if (onSearch) {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      onSearch("");
+    }
+  };
+
   const navTabs: { id: TabType; label: string; icon: string }[] = [
     { id: "accueil", label: "Accueil", icon: "home" },
     { id: "explorer", label: "Explorer", icon: "explore" },
@@ -40,9 +86,9 @@ export const Header: React.FC<HeaderProps> = ({
 
   return (
     <header className="sticky top-0 inset-x-0 z-40 bg-surface/90 backdrop-blur-xl border-b border-outline-variant/15 transition-all">
-      <div className="w-full max-w-7xl mx-auto h-16 px-margin flex items-center justify-between gap-4">
+      <div className="w-full max-w-7xl mx-auto h-16 px-margin flex items-center justify-between gap-3 sm:gap-4">
         {/* Brand Left */}
-        <div className="flex items-center gap-space-md">
+        <div className="flex items-center gap-space-md shrink-0">
           <button
             onClick={onGoHome}
             className="flex items-center gap-2 text-left focus:outline-none group cursor-pointer"
@@ -95,8 +141,53 @@ export const Header: React.FC<HeaderProps> = ({
           </nav>
         </div>
 
+        {/* Center: Functional Search Input (visible sm+ to keep mobile header tidy) */}
+        {onSearch && (
+          <div className="flex-1 max-w-md hidden sm:block">
+            <div
+              className={`relative flex items-center transition-all ${
+                searchFocused ? "scale-[1.01]" : ""
+              }`}
+            >
+              <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-outline text-[18px] pointer-events-none">
+                search
+              </span>
+              <input
+                value={searchValue}
+                onChange={(e) => handleSearchInput(e.target.value)}
+                onKeyDown={handleSearchKeyDown}
+                onFocus={() => setSearchFocused(true)}
+                onBlur={() => setSearchFocused(false)}
+                type="text"
+                placeholder="Tapez un Titre, un Acteur, un Genre..."
+                className="w-full h-9 pl-9 pr-9 bg-surface-container-high text-on-surface text-body-sm rounded-full outline-none focus:ring-2 focus:ring-primary placeholder:text-outline transition-all border border-outline-variant/20"
+              />
+              {searchValue && (
+                <button
+                  onClick={handleClearSearch}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full flex items-center justify-center text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest transition-colors cursor-pointer"
+                  title="Effacer la recherche"
+                >
+                  <span className="material-symbols-outlined text-[15px]">close</span>
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Mobile-only search icon button (expands by switching to Explorer tab) */}
+        {onSearch && (
+          <button
+            onClick={() => onTabChange("explorer")}
+            className="sm:hidden w-9 h-9 rounded-full bg-surface-container-high flex items-center justify-center text-on-surface-variant hover:text-on-surface transition-colors cursor-pointer shrink-0"
+            title="Rechercher"
+          >
+            <span className="material-symbols-outlined text-[20px]">search</span>
+          </button>
+        )}
+
         {/* Right Actions */}
-        <div className="flex items-center gap-space-sm sm:gap-space-md">
+        <div className="flex items-center gap-space-sm sm:gap-space-md shrink-0">
           {/* uBlock Origin Shield quick launcher */}
           {onOpenUBlock && (
             <button
@@ -105,7 +196,7 @@ export const Header: React.FC<HeaderProps> = ({
               className="px-2.5 py-1.5 rounded-full bg-primary/10 hover:bg-primary/20 text-primary border border-primary/25 transition-all cursor-pointer flex items-center gap-1.5 text-label-sm"
             >
               <span className="material-symbols-outlined text-[17px]">shield</span>
-              <span className="hidden sm:inline font-bold">uBlock 0 pub</span>
+              <span className="hidden lg:inline font-bold">uBlock 0 pub</span>
               <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
             </button>
           )}
@@ -122,7 +213,7 @@ export const Header: React.FC<HeaderProps> = ({
               }`}
             >
               <span className="material-symbols-outlined text-[18px]">tv</span>
-              <span className="hidden sm:inline font-medium">
+              <span className="hidden lg:inline font-medium">
                 {tvMode ? "Mode TV" : "TV"}
               </span>
             </button>

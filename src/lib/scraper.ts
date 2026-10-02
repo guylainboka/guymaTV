@@ -70,6 +70,12 @@ export interface CatalogOptions {
   type?: "films" | "series" | "all";
   page?: number;
   search?: string;
+  /** Filter option id (e.g. "action", "vf", "2024") — resolves via filters.ts */
+  filter?: string;
+  /** Custom path (overrides filter) */
+  path?: string;
+  /** Random mode — picks a random page from the source */
+  random?: boolean;
 }
 
 export interface CatalogResult {
@@ -157,8 +163,11 @@ function parseCard(
   // Trailer YouTube ID (kept for potential future use, not surfaced yet)
   // const trailerId = $card.find(`#trailer-${fssId}`).first().text().trim();
 
-  // Determine if it's a series or film based on URL/context
-  const isSeries = href.includes("series") || href.includes("serie");
+  // Determine if it's a series or film based on title/context.
+  // french-stream.net card hrefs are always /index.php?newsid=XXX so we
+  // can't rely on the URL — we check the title for "Saison N" pattern
+  // (the source site appends "- Saison N" to series titles).
+  const isSeries = /[-–—]\s*Saison\s*\d+/i.test(title) || /Saison\s*\d+/i.test(title);
   const category: CategoryType = isSeries ? "Séries" : "Cinéma";
 
   return {
@@ -201,23 +210,28 @@ function parseCard(
 
 /**
  * Get the catalog (films or series) from french-stream.net.
+ *
+ * Supports:
+ *   - type: "films" | "series" | "all"  (catalog main pages)
+ *   - filter: a FilterOption id from filters.ts (genre/langue/pays/thème/année/sélection)
+ *   - path: a direct path on french-stream.net (overrides filter)
+ *   - search: client-side filter (site search endpoint is 302-protected)
+ *   - random: picks a random page from the source for variety
+ *   - page: 1-based page number
  */
 export async function getCatalog(
   opts: CatalogOptions = {}
 ): Promise<CatalogResult> {
-  const { type = "all", page = 1, search } = opts;
+  const { type = "all", page = 1, search, filter, path, random } = opts;
 
-  // The source site's search endpoint (/index.php?do=search&story=XXX) is
-  // protected by a 302 redirect (likely a DLE security token requirement).
-  // As a pragmatic fallback we scrape the first N catalog pages and filter
-  // client-side by title. This is slower but works reliably without cookies.
+  // 1. Search mode (client-side filter across multiple pages)
   if (search && search.trim().length >= 2) {
     const cacheKey = `search:${type}:${search.toLowerCase()}`;
     const cached = getCached<CatalogResult>(cacheKey);
     if (cached) return cached;
 
     const q = search.toLowerCase().trim();
-    const maxPagesToScan = 3; // 3 pages × ~18 items = ~54 candidates
+    const maxPagesToScan = 3;
     const allItems: StreamItem[] = [];
     let totalPages = 1;
 
@@ -247,20 +261,45 @@ export async function getCatalog(
     return result;
   }
 
+  // 2. Filter mode (by genre/langue/pays/thème/année/sélection)
+  if (filter) {
+    const { findFilterOption } = await import("./filters");
+    const opt = findFilterOption(filter);
+    if (opt) {
+      return getCatalogByPath(opt.path, page);
+    }
+  }
+
+  // 3. Direct path mode
+  if (path) {
+    return getCatalogByPath(path, page);
+  }
+
+  // 4. Random mode — pick a random page from films or series
+  if (random) {
+    const items = await getRandomCatalog(36);
+    return {
+      items,
+      totalPages: 1,
+      currentPage: 1,
+    };
+  }
+
+  // 5. Default catalog browsing
   const cacheKey = `catalog:${type}:${page}`;
   const cached = getCached<CatalogResult>(cacheKey);
   if (cached) return cached;
 
-  let path: string;
+  let p: string;
   if (type === "films") {
-    path = page > 1 ? `/films/page/${page}/` : `/films/`;
+    p = page > 1 ? `/films/page/${page}/` : `/films/`;
   } else if (type === "series") {
-    path = page > 1 ? `/series/page/${page}/` : `/series/`;
+    p = page > 1 ? `/series/page/${page}/` : `/series/`;
   } else {
-    path = page > 1 ? `/page/${page}/` : `/`;
+    p = page > 1 ? `/page/${page}/` : `/`;
   }
 
-  const html = await fetchPage(path);
+  const html = await fetchPage(p);
   const $ = cheerio.load(html);
 
   const items: StreamItem[] = [];
@@ -481,25 +520,363 @@ export function getServices(): StreamService[] {
 /**
  * Resolve available video servers (lecteurs) for a given movie/series.
  *
- * The source site loads players via JavaScript (iframes fsurl.lol).
- * For the wrapper app, we expose the source URL as a single "secure player"
- * server. The actual filtering happens in the /api/proxy route which serves
- * the source page with all ads/popups stripped.
+ * Delegates to the Playwright extractor (which clicks through .player-option
+ * buttons and intercepts direct .mp4/.m3u8 URLs). Falls back to the proxy
+ * iframe if extraction fails.
  */
 export async function getServers(newsid: string): Promise<StreamServer[]> {
-  // We expose a single server pointing to our filtered proxy.
-  // The proxy strips ads, blocks popups, and serves the page in an iframe.
-  return [
-    {
-      id: `srv-${newsid}-secure`,
-      name: "Lecteur Sécurisé guymaTV",
-      hoster: "Direct 4K",
-      quality: "1080p",
-      language: "VF",
-      speed: "Ultra Rapide (sans pub)",
-      videoUrl: `/api/proxy?page=${newsid}`,
-    },
-  ];
+  // Lazy-load Playwright only when needed (keeps startup fast)
+  const { extractVideoServers } = await import("./video-extractor");
+  try {
+    return await extractVideoServers(newsid);
+  } catch (err) {
+    console.error("[getServers] extractor failed, returning proxy fallback:", err);
+    return [
+      {
+        id: `srv-${newsid}-secure`,
+        name: "Lecteur Sécurisé guymaTV",
+        hoster: "Direct 4K",
+        quality: "1080p",
+        language: "VF",
+        speed: "Ultra Rapide (sans pub)",
+        videoUrl: `/api/proxy?page=${newsid}`,
+      },
+    ];
+  }
+}
+
+/**
+ * Get the catalog by an arbitrary path on french-stream.net.
+ *
+ * Used by /api/catalog?filter=<id> where <id> references a FilterOption.path
+ * (e.g. "/films/actions/", "/xfsearch/lang/Japonais/", "/films-2024/").
+ *
+ * The function scrapes the given path with pagination support and returns the
+ * same shape as getCatalog().
+ */
+export async function getCatalogByPath(
+  path: string,
+  page: number = 1
+): Promise<CatalogResult> {
+  const cacheKey = `path:${path}:${page}`;
+  const cached = getCached<CatalogResult>(cacheKey);
+  if (cached) return cached;
+
+  // The source site uses /page/N/ suffix for pagination
+  let url: string;
+  if (page > 1) {
+    // Strip trailing slash and append /page/N/
+    const base = path.replace(/\/+$/, "");
+    url = `${base}/page/${page}/`;
+  } else {
+    url = path;
+  }
+
+  const html = await fetchPage(url);
+  const $ = cheerio.load(html);
+
+  const items: StreamItem[] = [];
+  $(".short").each((_, el) => {
+    if (!$(el).find('a[href*="newsid"]').length) return;
+    const item = parseCard($, el);
+    if (item) items.push(item);
+  });
+
+  // Pagination detection — DLE uses .navigation > a
+  let totalPages = page;
+  const navMatches: number[] = [];
+  $(".navigation a, .pagination a, .nav-pages a").each((_, a) => {
+    const txt = $(a).text().trim();
+    const n = parseInt(txt, 10);
+    if (!isNaN(n)) navMatches.push(n);
+  });
+  if (navMatches.length) totalPages = Math.max(...navMatches, page);
+
+  const result: CatalogResult = { items, totalPages, currentPage: page };
+  setCached(cacheKey, result);
+  return result;
+}
+
+/**
+ * Get random items from french-stream.net — used by Explorer's "aléatoire"
+ * mode. We pick a random page (1-30) from /films/ and return its items.
+ *
+ * To increase variety, we can mix films + series by calling both.
+ */
+export async function getRandomCatalog(
+  count: number = 18
+): Promise<StreamItem[]> {
+  // Pick a random page between 1 and 40 (the source site has ~1300+ pages)
+  const randomPage = Math.floor(Math.random() * 40) + 1;
+  const type = Math.random() > 0.5 ? "films" : "series";
+  try {
+    const result = await getCatalog({ type, page: randomPage });
+    // Shuffle the items for extra randomness
+    const shuffled = [...result.items].sort(() => Math.random() - 0.5);
+    return shuffled.slice(0, count);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Get random items from a specific filter (genre, pays, thème, etc.)
+ * Picks a random page within that filter's results.
+ */
+export async function getRandomByFilter(
+  filterPath: string,
+  count: number = 18
+): Promise<StreamItem[]> {
+  try {
+    // First fetch page 1 to get total pages
+    const first = await getCatalogByPath(filterPath, 1);
+    const maxPage = Math.min(first.totalPages || 1, 40);
+    const randomPage = Math.floor(Math.random() * maxPage) + 1;
+    if (randomPage === 1) {
+      const shuffled = [...first.items].sort(() => Math.random() - 0.5);
+      return shuffled.slice(0, count);
+    }
+    const result = await getCatalogByPath(filterPath, randomPage);
+    const shuffled = [...result.items].sort(() => Math.random() - 0.5);
+    return shuffled.slice(0, count);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Get series episodes (seasons + episodes) for a series newsid.
+ *
+ * The source site loads episodes via JS into #vf-episodes / #vostfr-episodes,
+ * and seasons into .seasons-grid > .season-card. We need to use Playwright
+ * to render this dynamic content.
+ *
+ * Returns the seasons/episodes structure. We focus on VF (the user requested
+ * "on prend en charge que le vf des filmes version francais") but also
+ * include VOSTFR episodes for completeness.
+ */
+export interface SeriesEpisode {
+  id: string;
+  episodeNumber: number;
+  seasonNumber: number;
+  title: string;
+  duration?: string;
+  videoUrl: string; // /api/proxy?page=<newsid>&season=X&episode=Y
+  synopsis?: string;
+  language: "VF" | "VOSTFR";
+}
+
+export interface SeriesSeason {
+  seasonNumber: number;
+  title: string;
+  episodesCount: number;
+  posterUrl?: string;
+}
+
+export interface SeriesStructure {
+  newsid: string;
+  title: string;
+  seasons: SeriesSeason[];
+  episodes: SeriesEpisode[]; // flattened across all seasons
+  currentSeason: number;
+}
+
+export async function getSeriesStructure(
+  newsid: string
+): Promise<SeriesStructure | null> {
+  const cacheKey = `series:${newsid}`;
+  const cached = getCached<SeriesStructure>(cacheKey);
+  if (cached) return cached;
+
+  // Use Playwright to render the JS-driven episode list
+  const { chromium } = await import("playwright");
+  let browser;
+  try {
+    browser = await chromium.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+    });
+  } catch (err) {
+    console.error("[getSeriesStructure] Playwright launch failed:", err);
+    return null;
+  }
+
+  try {
+    const context = await browser.newContext({
+      userAgent:
+        "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+      locale: "fr-FR",
+      viewport: { width: 1280, height: 720 },
+    });
+
+    // Block ads
+    const blockedHosts = [
+      "doubleclick.net", "googlesyndication.com", "exoclick.com",
+      "trafficjunky.net", "histats.com", "popads.net", "fsurl.lol",
+      "qnlbktsubwtnf.space", "adexchangerapid.com", "kmqufetbovsea.site",
+    ];
+    await context.route((url: URL) => {
+      return blockedHosts.some((b) => url.hostname.includes(b));
+    }, (route) => route.abort());
+
+    const page = await context.newPage();
+    await page.addInitScript(() => { window.open = () => null; });
+
+    const sourceUrl = `${BASE_URL}/index.php?newsid=${newsid}`;
+    await page.goto(sourceUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: 20000,
+    });
+    await page.waitForTimeout(3000);
+
+    // Remove anti-bot overlay
+    await page.evaluate(() => {
+      document.querySelectorAll("#dontfoid, [znid], .fssts-card").forEach((el) => el.remove());
+    }).catch(() => {});
+
+    // Extract seasons
+    const seasons: SeriesSeason[] = await page.evaluate(() => {
+      const cards = document.querySelectorAll(".season-card, .seasons-grid > div");
+      const out: { seasonNumber: number; title: string; episodesCount: number }[] = [];
+      cards.forEach((c) => {
+        const text = (c.textContent || "").trim();
+        const m = text.match(/Saison\s*(\d+)/i);
+        if (m) {
+          out.push({
+            seasonNumber: parseInt(m[1], 10),
+            title: text.slice(0, 80),
+            episodesCount: 0,
+          });
+        }
+      });
+      // Deduplicate by season number
+      const seen = new Set<number>();
+      return out.filter((s) => {
+        if (seen.has(s.seasonNumber)) return false;
+        seen.add(s.seasonNumber);
+        return true;
+      });
+    }).catch(() => []);
+
+    // If no seasons found, assume single-season series
+    if (seasons.length === 0) {
+      seasons.push({
+        seasonNumber: 1,
+        title: "Saison 1",
+        episodesCount: 0,
+      });
+    }
+
+    // For each season, click it (if multiple) and extract episodes
+    const allEpisodes: SeriesEpisode[] = [];
+    const currentSeason = seasons[0]?.seasonNumber || 1;
+
+    for (const season of seasons.slice(0, 5)) {
+      // Try to click this season card
+      if (seasons.length > 1) {
+        await page
+          .evaluate((sNum) => {
+            const cards = document.querySelectorAll(".season-card, .seasons-grid > div");
+            cards.forEach((c) => {
+              if ((c.textContent || "").includes(`Saison ${sNum}`)) {
+                (c as HTMLElement).click();
+              }
+            });
+          }, season.seasonNumber)
+          .catch(() => {});
+        await page.waitForTimeout(1500);
+      }
+
+      // Extract VF episodes (priority — user requested VF support)
+      const vfEpisodes: SeriesEpisode[] = await page
+        .evaluate((sNum) => {
+          const rows = document.querySelectorAll("#vf-episodes .episode-row, #vf-episodes [class*=ep]");
+          const eps: { n: number; title: string; synopsis?: string }[] = [];
+          rows.forEach((r) => {
+            const title = r.querySelector(".ep-title")?.textContent?.trim() || r.textContent?.trim() || "";
+            const m = title.match(/Episode\s*(\d+)/i);
+            if (m) {
+              const synopsis = r.querySelector(".ep-info")?.textContent?.trim();
+              eps.push({ n: parseInt(m[1], 10), title, synopsis });
+            }
+          });
+          return eps.map((e) => ({
+            id: `s${sNum}e${e.n}`,
+            episodeNumber: e.n,
+            seasonNumber: sNum,
+            title: e.title,
+            videoUrl: "",
+            synopsis: e.synopsis,
+            language: "VF" as const,
+          }));
+        }, season.seasonNumber)
+        .catch(() => []);
+
+      // Extract VOSTFR episodes (fallback if no VF)
+      let vostfrEpisodes: SeriesEpisode[] = [];
+      if (vfEpisodes.length === 0) {
+        vostfrEpisodes = await page
+          .evaluate((sNum) => {
+            const rows = document.querySelectorAll("#vostfr-episodes .episode-row, #vostfr-episodes [class*=ep]");
+            const eps: { n: number; title: string; synopsis?: string }[] = [];
+            rows.forEach((r) => {
+              const title = r.querySelector(".ep-title")?.textContent?.trim() || r.textContent?.trim() || "";
+              const m = title.match(/Episode\s*(\d+)/i);
+              if (m) {
+                const synopsis = r.querySelector(".ep-info")?.textContent?.trim();
+                eps.push({ n: parseInt(m[1], 10), title, synopsis });
+              }
+            });
+            return eps.map((e) => ({
+              id: `s${sNum}e${e.n}`,
+              episodeNumber: e.n,
+              seasonNumber: sNum,
+              title: e.title,
+              videoUrl: "",
+              synopsis: e.synopsis,
+              language: "VOSTFR" as const,
+            }));
+          }, season.seasonNumber)
+          .catch(() => []);
+      }
+
+      // Assign video URLs — each episode loads via our proxy with season/episode query
+      const chosenEpisodes = vfEpisodes.length > 0 ? vfEpisodes : vostfrEpisodes;
+      // Deduplicate by (seasonNumber, episodeNumber) — the source site sometimes
+      // renders the same episode row multiple times in #vf-episodes.
+      const seenKeys = new Set<string>();
+      const deduped = chosenEpisodes.filter((ep) => {
+        const key = `${ep.seasonNumber}-${ep.episodeNumber}`;
+        if (seenKeys.has(key)) return false;
+        seenKeys.add(key);
+        ep.videoUrl = `/api/proxy?page=${newsid}&season=${ep.seasonNumber}&episode=${ep.episodeNumber}`;
+        return true;
+      });
+      allEpisodes.push(...deduped);
+      season.episodesCount = deduped.length;
+    }
+
+    // Get the series title from h1
+    const title = await page.locator("h1").first().textContent().catch(() => "") || "";
+    const cleanTitle = title.replace(/\s+/g, " ").trim();
+
+    const result: SeriesStructure = {
+      newsid,
+      title: cleanTitle,
+      seasons,
+      episodes: allEpisodes,
+      currentSeason,
+    };
+
+    setCached(cacheKey, result);
+    await context.close();
+    return result;
+  } catch (err) {
+    console.error("[getSeriesStructure] error:", err);
+    return null;
+  } finally {
+    await browser.close().catch(() => {});
+  }
 }
 
 export { BASE_URL };

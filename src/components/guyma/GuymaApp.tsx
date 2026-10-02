@@ -73,6 +73,11 @@ export default function GuymaApp() {
   const [isUBlockOpen, setIsUBlockOpen] = useState<boolean>(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
+  // Search query forwarded from the Header → ExplorerScreen. When the user
+  // types in the Header search input, we navigate to the Explorer tab and
+  // sync the query into ExplorerScreen's internal search state.
+  const [explorerSearch, setExplorerSearch] = useState<string>("");
+
   // Keep track of in-flight download progress intervals so we can clean up.
   const downloadIntervalsRef = useRef<Map<string, ReturnType<typeof setInterval>>>(
     new Map()
@@ -131,7 +136,14 @@ export default function GuymaApp() {
     refreshDownloads();
   }, [refreshDownloads]);
 
-  // -------- Sync document title --------
+  // -------- Header → Explorer search wiring --------
+  const handleHeaderSearch = useCallback((query: string) => {
+    setExplorerSearch(query);
+    setCurrentTab("explorer");
+    setIsUpgradeOpen(false);
+  }, []);
+
+  // Sync document title
   useEffect(() => {
     document.title = isUpgradeOpen
       ? "guymaTV PRO - Passer au streaming 4K illimité"
@@ -430,6 +442,7 @@ export default function GuymaApp() {
           onToggleTvMode={handleToggleTvMode}
           favoritesCount={favoriteIds.length}
           downloadsCount={downloads.length}
+          onSearch={handleHeaderSearch}
         />
       )}
 
@@ -467,6 +480,7 @@ export default function GuymaApp() {
             onToggleFavorite={handleToggleFavorite}
             onStartDownload={handleStartDownload}
             services={services}
+            initialSearch={explorerSearch}
           />
         ) : currentTab === "favoris" ? (
           <FavorisScreen

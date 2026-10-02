@@ -1,6 +1,9 @@
 /**
  * guymaTV - Catalog API
- * GET /api/catalog?type=films|series|all&page=1&search=xxx
+ * GET /api/catalog?type=films|series|all&page=1&search=xxx&filter=action&path=/films/actions/&random=1
+ *
+ * Supports browsing, searching, filtering (by genre/langue/pays/thème/année)
+ * and random mode (for Explorer's random discovery).
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -18,8 +21,18 @@ export async function GET(req: NextRequest) {
       | "all";
     const page = parseInt(searchParams.get("page") || "1", 10);
     const search = searchParams.get("search") || undefined;
+    const filter = searchParams.get("filter") || undefined;
+    const path = searchParams.get("path") || undefined;
+    const random = searchParams.get("random") === "1";
 
-    const result = await getCatalog({ type, page, search });
+    const result = await getCatalog({
+      type,
+      page,
+      search,
+      filter,
+      path,
+      random,
+    });
     return NextResponse.json(result);
   } catch (err) {
     console.error("[/api/catalog] error:", err);

@@ -286,3 +286,128 @@ Stage Summary:
   * Backend deployed separately (Render/Railway/Fly.io/VPS), APK points to it via GUYMA_API_BASE_URL secret
   * Runtime override via window.__API_BASE_URL__ allows re-pointing APK without rebuild
 - Architecture: Static APK frontend (Capacitor) ←→ Deployed Next.js backend (Playwright + Prisma + scraping) ←→ french-stream.net
+
+---
+Task ID: 9-filters-comments-ui
+Agent: full-stack-developer
+Task: Update the guymaTV UI to use the new filters system and comments/reviews backend. (1) Refonte de ExplorerScreen avec une barre de filtres complète à 7 dropdowns + barre de recherche + pagination. (2) Refonte de SecureBrowserModal en page de lecture complète avec hero, info, épisodes de séries, commentaires & avis. (3) Rendre la recherche du Header fonctionnelle (navigation vers Explorer).
+
+Work Log:
+- Read /home/z/my-project/worklog.md (tasks 4-ui-port, 5-11-backend, 7-video-player, A-C-playwright-capacitor, 1-8-filters-base) to absorb full project context.
+- Read existing files: src/components/guyma/ExplorerScreen.tsx (338 lines, basic search + categories), src/components/guyma/SecureBrowserModal.tsx (863 lines, video player + servers + basic media details), src/components/guyma/Header.tsx (162 lines, no search input), src/components/guyma/GuymaApp.tsx (539 lines, orchestrator), src/lib/filters.ts (FILTER_GROUPS with 7 groups + helpers), src/lib/types.ts, src/lib/api-client.ts, src/app/api/comments/route.ts (CommentDTO + GET/POST/DELETE), src/app/api/series-structure/route.ts, src/app/api/catalog/route.ts, src/app/globals.css (theme variables + typography utilities).
+- PART 3 — Updated /home/z/my-project/src/components/guyma/Header.tsx (162 → 252 lines):
+  * Added `onSearch?: (query: string) => void` prop to HeaderProps.
+  * Added local `searchValue` state with a 500ms debounce timer (debounceRef).
+  * Added a functional search input (visible sm+, hidden on mobile) between the brand/nav and the right actions. The input has a "search" Material Symbol icon on the left and a clear (X) button on the right when text is present.
+  * handleSearchInput updates local state immediately and schedules a debounced onSearch call.
+  * handleSearchKeyDown fires onSearch immediately on Enter.
+  * handleClearSearch clears the input AND fires onSearch("") so the parent can reset.
+  * Added a mobile-only search icon button (sm:hidden) that switches to the Explorer tab via onTabChange — keeps the mobile header tidy while still giving access to search.
+  * All Material Symbols Outlined icons preserved (search, close, tv, shield, workspace_premium, person).
+- Updated /home/z/my-project/src/components/guyma/GuymaApp.tsx (539 → 552 lines):
+  * Added `explorerSearch` state (string, default "") to hold the search query forwarded from the Header.
+  * Added `handleHeaderSearch` useCallback that sets `explorerSearch = query`, sets `currentTab = "explorer"`, and closes any open Upgrade modal.
+  * Passed `onSearch={handleHeaderSearch}` to the Header.
+  * Passed `initialSearch={explorerSearch}` to ExplorerScreen.
+- PART 1 — Rewrote /home/z/my-project/src/components/guyma/ExplorerScreen.tsx (338 → 752 lines):
+  * Removed the old category pills / quality filter / services chips layout (was decorative + client-side filtered).
+  * Imported FILTER_GROUPS, FilterGroup, FilterOption, findFilterOption, buildYearFilter from @/lib/filters.
+  * Added `initialSearch` prop wired from GuymaApp. A useEffect with `lastAppliedSearchRef` syncs the prop into internal `searchInput` + `searchQuery` state (only when the prop actually changes — avoids loops when the user types in ExplorerScreen's own search bar).
+  * State: `searchInput` (immediate), `searchQuery` (debounced 500ms via searchDebounceRef), `activeFilters: Record<groupId, optionId>`, `lastChangedGroup: string | null`, `activePath: string | null` (for custom year), `customYear: string`, `randomTrigger: number`, `currentPage`, `items`, `totalPages`, `loading`, `error`, `openDropdown`.
+  * Top search bar: prominent full-width rounded-2xl input with "search" icon, "Tapez un Titre, un Acteur, un Genre..." placeholder, X clear button. Debounced 500ms + Enter support.
+  * Filter bar: 7 FilterDropdown buttons (Type, Genre, Langue, Pays, Thème, Sélections, Année) rendered from FILTER_GROUPS. Horizontal scroll on mobile (scrollbar-none), wraps on desktop. Each button shows the group icon + selected option label (or group label) + chevron_down (rotates when open). Selected buttons get bg-primary/15 text-primary border-primary/40.
+  * FilterDropdown sub-component: absolute-positioned panel below the trigger (w-64, max-h-80, overflow-y-auto with guyma-scroll). Group header sticky at top. For the "annee" group, a custom year input ("Ex: 1995") with a search button is sticky at the top of the panel — calls buildYearFilter(year) and sets activePath. Each option row: icon + label + check mark if selected.
+  * Outside-click handler (document mousedown) closes any open dropdown.
+  * "Réinitialiser" button appears when any filter is active (hasActiveFilters). Clears all filters + customYear + activePath.
+  * "Aléatoire" button clears everything and increments randomTrigger — fetches /api/catalog?random=1.
+  * Fetch effect: builds URL params based on priority (search > activePath > activeFilterOption.id > random > default type=all). Resets to page 1 on any filter/search change.
+  * Results grid: 2 cols mobile, 3 sm, 4 md, 5 lg, 6 xl. Each card: poster image (with fallbackGradient), quality/LIVE badge, download + favorite buttons (top-right), title + platform + rating (bottom), duration/year + play icon (footer).
+  * Loading state: 12 GridCardSkeleton cards.
+  * Error state: cloud_off icon + error message + "Réessayer" button (increments randomTrigger to force re-fetch).
+  * Empty state: search_off icon + "Aucun résultat" + "Réinitialiser les filtres" button.
+  * Pagination: Previous/Next buttons + "Page X sur Y" indicator. Disabled at boundaries. Smooth scroll to top on page change.
+  * Services chips footer (preserved from original, now read-only display).
+- PART 2 — Rewrote /home/z/my-project/src/components/guyma/SecureBrowserModal.tsx (863 → 1633 lines):
+  * Kept ALL existing logic: /api/extract fetch, hls.js dynamic import + .m3u8 attachment, native <video> vs iframe fallback (isDirectVideo), all player controls (togglePlay, toggleFullscreen, skipBy, handleSeek, handleVolumeChange, toggleMute, formatSeconds), handleServerSwitch, handleRefresh, fullscreen change listener, keyboard shortcuts (Space/Enter, ←/→, ↑/↓, M, F, Esc), serverLabel helper, timelinePct, buildProxyFallback, UBlockModal trigger.
+  * Replaced `selectedEpisodeIndex: number` state with `selectedEpisode: SeriesEpisode | null` state. Updated `currentVideoUrl` to use `selectedEpisode?.videoUrl || currentServer?.videoUrl || proxy fallback`. Updated video/iframe `key` props to include `episodeKeyFragment = selectedEpisode?.id || "default"`.
+  * Added NEW state: `seriesStructure: SeriesStructure | null`, `seriesLoading: boolean`, `selectedSeason: number`, `comments: CommentDTO[]`, `commentsLoading: boolean`, `averageRating: number`, `newCommentName`, `newCommentRating`, `hoverRating`, `newCommentContent`, `submittingComment`, `replyingTo: string | null`.
+  * Defined SeriesEpisode, SeriesSeason, SeriesStructure, CommentDTO interfaces locally (mirroring src/lib/scraper.ts and /api/comments) to avoid importing server-only modules into the client bundle.
+  * Added StarRow helper component (read-only 5-star display).
+  * Added recursive CommentItem component: avatar (initials), name, star row, date (fr-FR), content, "Répondre" button (toggles inline reply form), delete button (X). Replies nested with ml-10 sm:ml-12 indentation. Inline reply form: textarea + send button.
+  * isSeries detection: `item.category === "Séries" || item.category === "Animés" || (item.episodes && item.episodes.length > 0)`.
+  * NEW useEffect: fetches /api/series-structure?id=item.id on mount (only if isSeries). Sets seriesStructure + selectedSeason (defaults to currentSeason or first season). Loading state "Chargement des épisodes..." with spinner. Error state with "info" icon. Empty state "Aucun épisode VF disponible".
+  * NEW refreshComments useCallback + useEffect: fetches /api/comments?streamItemId=item.id on mount. Uses commentsCancelRef to cancel in-flight fetches (prevents stale state updates + late setComments on unmounted modal). Sets comments + averageRating.
+  * Series episodes section (only rendered if isSeries): season selector (horizontal tabs from seriesStructure.seasons, each shows "Saison N (episodesCount)"), episode list (vertical, max-h-96 overflow-y-auto, guyma-scroll). Filters to VF episodes per spec (falls back to all episodes if no VF for the season). Each episode row: number badge, title, synopsis (line-clamp-2), duration, VF badge, "En lecture" indicator if selected, play_circle icon. Clicking calls handleSelectEpisode(episode) which sets selectedEpisode, switchingServer=true, resets currentTime/duration.
+  * handleSelectEpisode sets selectedEpisode — the currentVideoUrl recomputes to the episode's videoUrl (which is /api/proxy?page=...&season=X&episode=Y per the scraper), isDirectVideo returns false, so the iframe fallback renders and reloads via the key change.
+  * Comments section (always rendered): header with "Commentaires & Avis" + average rating display (StarRow + numeric + count). Add comment form: name input (placeholder "Votre nom (optionnel)"), 5-star rating selector (clickable + hover effect), textarea (placeholder "Partagez votre avis sur ce film..."), "Publier" submit button. Submit calls POST /api/comments with streamItemId, userName (defaults to "Anonyme"), rating, content. After POST, refreshComments() re-fetches the list. Comments list: recursive CommentItem rendering with nested replies. Empty state: "Soyez le premier à laisser un avis" with forum icon.
+  * handleReplySubmit POSTs with parentId, then refreshComments. handleDeleteComment DELETEs /api/comments?id=xxx, then refreshComments.
+  * Hero section: backdrop image (item.imageUrl with opacity-60 + fallbackGradient), gradient scrim, title (h1, drop-shadow), originalTitle (italic), badges (quality HD, year, rating star, duration), action buttons (Lecture, Télécharger, Favori, Partager). handleShare uses navigator.share if available, falls back to clipboard.
+  * Info section: poster (left, 32x48 / 36x52), metadata (right): platform badge, category, duration, rating (star), year, title (h2), tags (up to 6 chips), director + actors, description, uBlock protection banner (preserved from original).
+  * Kept the existing top action bar (back, refresh, uBlock pill, uBlock trigger, Télécharger, favorite, fullscreen, close) and the video quality badge (now shows "S{season} E{episode}" when an episode is selected, otherwise currentServer.quality).
+  * Player bottom control bar: now shows "S{season}:E{episode} · VF" badge when an episode is selected, otherwise the existing "{hoster} ({language})" badge.
+  * All Material Symbols Outlined icons preserved (no Lucide). All Material 3 theme classes preserved (bg-surface-container, text-on-surface, text-primary, border-outline-variant/15, etc.). All Maquette aesthetic preserved (rounded-2xl, backdrop-blur, shadow-2xl).
+- Verified dev.log shows successful compilation (✓ Compiled in 263ms) and successful API requests: GET /api/catalog?page=1&type=all 200, GET /api/catalog?page=2&type=all 200 (pagination working). No errors.
+
+Stage Summary:
+- artifacts produced:
+  * /home/z/my-project/src/components/guyma/Header.tsx (162 → 252 lines) — functional search input with debounce + onSearch prop.
+  * /home/z/my-project/src/components/guyma/GuymaApp.tsx (539 → 552 lines) — explorerSearch state + handleHeaderSearch wiring (Header → ExplorerScreen).
+  * /home/z/my-project/src/components/guyma/ExplorerScreen.tsx (338 → 752 lines) — full filter UI: prominent search bar, 7 FilterDropdown buttons (Type/Genre/Langue/Pays/Thème/Sélections/Année) with per-group selection, custom year input inside the Année dropdown, Réinitialiser + Aléatoire buttons, responsive results grid (2-6 cols), loading skeletons, error state with retry, empty state, pagination (Prev/Next + page indicator).
+  * /home/z/my-project/src/components/guyma/SecureBrowserModal.tsx (863 → 1633 lines) — full reading page: hero section (backdrop + title + badges + actions), video player stage (preserved hls.js + iframe fallback), streaming servers selector, info section (poster + metadata + tags + director/actors + synopsis + uBlock banner), series episodes section (season tabs + VF episode list with play buttons, fetched from /api/series-structure), comments & reviews section (add form with name + 5-star rating + textarea, recursive comments with nested replies, inline reply forms, delete buttons, fetched from /api/comments). All existing player logic preserved (hls.js, server fetch, controls, keyboard shortcuts).
+- guymaTV now has a complete french-stream.net-style browse + watch experience: filter by 80+ options across 7 dimensions, custom year search, random discovery, full movie/series reading page with cast/synopsis, VF-only series episodes, and a community comments/reviews system with star ratings and threaded replies.
+
+---
+Task ID: 10-filters-comments-complete
+Agent: main (Z.ai Code)
+Task: Complete filter system mirroring french-stream.net + full reading page with series episodes + comments/reviews.
+
+Work Log:
+- Analyzed user's screenshot of french-stream.net via VLM (z-ai vision) — identified 6 filter groups: Par Genre, Par Langue, Par Pays, Par Thème, Sélections, Par Année
+- Scraped french-stream.net homepage with cheerio to extract ALL real filter URLs:
+  * 19 genres (Action → /films/actions/, Aventure, Animation, Arts Martiaux, Biopic, Comédie, Drame, Documentaire, Horreur, Historique, Espionnage, Famille, Fantastique, Guerre, Policier, Romance, Science fiction, Thriller, Western)
+  * 3 langues (Tous, VF, VOSTFR)
+  * 19 pays (Anglophones, Français, Espagnols, Japonais, Allemands, Italiens, Coréens, Chinois, Russes, Néerlandais, Norvégiens, Portugais, Danois, Polonais, Indiens, Suédois, Thaïlandais, Turcs, Arabes)
+  * 27 thèmes (Aliens, IA, Autisme, Inspiré d'une histoire vraie, Passage à l'âge adulte, Trafic de drogue, Catastrophe, Dystopie, Amitié, Braquage, Espionnage, LGBT, La Bagarre, Maison hantée, Romance, Triangle amoureux, Religion, Vengeance, Tueur en série, Slasher, Voyage spatial, Super-héros, Survie, Boucle temporelle, Voyage temporel, Vampires, Zombies)
+  * 2 sélections (Films du moment, Notre sélection)
+  * 14 plages d'années (2026 → avant 1980)
+- Created /home/z/my-project/src/lib/filters.ts with FILTER_GROUPS array (7 groups, 87 options total), each option has id/label/path/icon (Material Symbols). Helpers: findFilterOption(id), buildYearFilter(year)
+- Extended src/lib/scraper.ts:
+  * Added CatalogOptions: filter, path, random
+  * Updated getCatalog to handle filter (resolves via findFilterOption), path (direct), random (picks random page)
+  * Added getCatalogByPath(path, page) — scrapes arbitrary french-stream.net path with pagination
+  * Added getRandomCatalog(count) — picks random page 1-40 from films or series, shuffles results
+  * Added getRandomByFilter(filterPath, count) — random page within a filter's results
+  * Fixed isSeries detection: now uses regex /Saison\s*\d+/i on title (href doesn't contain "series" for DLE cards)
+  * Added getSeriesStructure(newsid) — uses Playwright to render JS-driven episode list, returns seasons + episodes (VF priority, VOSTFR fallback), deduplicated by (season, episode) number
+- Created API routes:
+  * /api/filters → returns FILTER_GROUPS + buildYearPath helper
+  * /api/series-structure?id=xxx → returns series seasons + episodes (Playwright, 30-min cache)
+  * /api/comments (GET/POST/DELETE) → comments with rating, replies, average rating
+- Updated /api/catalog to accept filter, path, random params
+- Updated Prisma schema: added Comment model (id, streamItemId, userName, rating 0-5, content, parentId for replies, createdAt)
+- Pushed schema to SQLite via bun run db:push
+- Launched subagent (Task 9-filters-comments-ui) to refactor UI:
+  * ExplorerScreen: full search bar + 7 filter dropdowns + custom year input + Aléatoire button + Réinitialiser + responsive grid + pagination
+  * SecureBrowserModal: hero section + video player + info section + series episodes (season tabs + VF episode list) + comments/reviews (form with name + 5-star rating + textarea + Publier, nested replies, delete)
+  * Header: functional search input with debounce + mobile search icon
+  * GuymaApp: wired onSearch prop to navigate to Explorer
+- Verified end-to-end with Agent Browser:
+  * Explorer: 7 filter dropdowns render correctly with all options + icons
+  * Filter "Action" applied → button shows "Action" + results update
+  * Aléatoire button → random films from random pages
+  * Series (MobLand - Saison 2) → category now correctly "Séries" (fixed via title regex)
+  * Modal opens with: hero, video player (extraction loading), info, 6 VF episodes (deduplicated), comments section
+  * Comments API: POST creates comment, GET returns it with averageRating=5.0
+  * No console errors after dedup fix
+
+Stage Summary:
+- guymaTV now mirrors the FULL french-stream.net experience:
+  * 87 filter options across 7 groups (Genre, Langue, Pays, Thème, Sélections, Année + Type)
+  * Random discovery mode (Aléatoire)
+  * Custom year search
+  * Series episodes with season/episode structure (VF priority)
+  * Full reading page: hero, player, info, episodes, comments
+  * Comments & reviews with 5-star ratings + nested replies
+- All fetches go through apiUrl() (APK-compatible)
+- Backend scraping + Playwright extraction + Prisma persistence all working
+- Maquette Material 3 olive/emerald preserved throughout

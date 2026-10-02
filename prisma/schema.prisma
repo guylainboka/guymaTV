@@ -49,3 +49,16 @@ model Download {
   @@index([streamItemId])
   @@index([createdAt])
 }
+
+model Comment {
+  id           String   @id @default(cuid())
+  streamItemId String   // french-stream newsid
+  userName     String   @default("Anonyme")
+  rating       Int      @default(0) // 0-5 stars
+  content      String
+  parentId     String?  // for replies (null = top-level comment)
+  createdAt    DateTime @default(now())
+
+  @@index([streamItemId, createdAt])
+  @@index([parentId])
+}

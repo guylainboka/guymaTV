@@ -1,0 +1,289 @@
+     1→     1→# guymaTV - Worklog
+     2→     2→
+     3→     3→Projet : Portage de guymaTV (Vite/React) vers Next.js 16 avec backend réel scraping french-stream.net
+     4→     4→
+     5→     5→Objectifs :
+     6→     6→- Garder la maquette UI Material 3 (olive/emerald) identique
+     7→     7→- Supprimer toute l'IA (Gemini/@google/genai)
+     8→     8→- Supprimer les mock data
+     9→     9→- Backend réel qui scrape https://french-stream.net
+    10→    10→- Lecteur vidéo intégré (iframe filtrée, pas de barre d'adresse)
+    11→    11→- Bloqueur de pubs backend (proxy filtrant)
+    12→    12→- Téléchargement réel
+    13→    13→- Format APK mobile + TV (responsive)
+    14→    14→
+    15→    15→Structure du projet :
+    16→    16→- Source originale clonée : /home/z/my-project/guymaTV/ (Vite, à porter)
+    17→    17→- Projet cible : /home/z/my-project/ (Next.js 16)
+    18→    18→
+    19→    19→Décisions techniques :
+    20→    20→- cheerio pour le scraping HTML (installé)
+    21→    21→- Proxy filtrant côté serveur pour servir french-stream.net sans pubs dans iframe
+    22→    22→- Persistance via Prisma + SQLite (déjà configuré)
+    23→    23→- Garder Material Symbols Outlined (CDN) pour les icônes - pas Lucide
+    24→    24→- Garder polices Sora + Plus Jakarta Sans
+    25→    25→- Garder classes utilitaires custom (font-headline-lg, etc.)
+    26→    26→
+    27→    27→
+    28→    28→---
+    29→    29→Task ID: 4-ui-port
+    30→    30→Agent: full-stack-developer
+    31→    31→Task: Port the 14 guymaTV React components + uBlockEngine from Vite to Next.js 16 App Router, replacing mock data with fetch calls to /api/* routes and removing all AI references. Wire them into a GuymaApp orchestrator rendered by src/app/page.tsx.
+    32→    32→
+    33→    33→Work Log:
+    34→    34→- Read worklog.md, original App.tsx, all 14 source components, uBlockEngine.ts, mockData.ts, lib/types.ts, lib/scraper.ts, app/globals.css, app/layout.tsx, app/page.tsx to understand the project context, the maquette's exact className strings, and the StreamItem/StreamService/DownloadItem/UserSettings type shapes.
+    35→    35→- Created /home/z/my-project/src/components/guyma/ folder.
+    36→    36→- Ported the uBlockEngine service to /home/z/my-project/src/lib/uBlockEngine.ts (kept the real, educational uBlock Origin filter-list metadata and KNOWN_STREAMING_AD_RULES regex table — these are NOT mock data, they're authentic uBlock Origin references). Added TypeScript strict-mode escape fixes (escaped double quotes in strings, kept singleton uBlockEngineInstance export).
+    37→    37→- Ported the trivial components 1:1 with "use client" at the top, identical className strings and Material Symbols icons:
+    38→    38→    * Header.tsx
+    39→    39→    * BottomNavBar.tsx
+    40→    40→    * WelcomeScreen.tsx
+    41→    41→    * InfoModal.tsx
+    42→    42→    * ServicesBar.tsx
+    43→    43→    * UBlockModal.tsx (imports uBlockEngineInstance from "@/lib/uBlockEngine"; added guyma-scroll class on the scrollable tab content)
+    44→    44→    * UpgradeScreen.tsx
+    45→    45→- Ported SettingsScreen.tsx with NO changes to the UI — the original had no AI toggles so nothing needed removal. Only change: removed the broken avatar <img src={AIDA mock URL}> and replaced with the gradient+person fallback that was already there (the original's onError handler hid it anyway). Kept theme, TV mode, uBlock, anti-nudity, video quality, lossless audio, download quality, cache, à propos, logout.
+    46→    46→- Ported DownloadsScreen.tsx 1:1 (it already takes a `downloads: DownloadItem[]` prop, no mock data inside).
+    47→    47→- Ported DashboardScreen.tsx with major changes:
+    48→    48→    * Replaced `import { POPULAR_PLATFORMS, RECOMMENDED_CHANNELS } from '../data/mockData'` with two useEffect fetches to `/api/catalog?type=films&page=1` and `/api/catalog?type=series&page=1`.
+    49→    49→    * Added `films`, `filmsLoading`, `filmsError`, `series`, `seriesLoading`, `seriesError` state.
+    50→    50→    * Added CardSkeleton and ChannelSkeleton components shown during loading.
+    51→    51→    * Added error state UIs (cloud_off icon + message) when fetch fails.
+    52→    52→    * Hero carousel now waits for films to load (shows pulsing skeleton during loading).
+    53→    53→    * Kept all className strings, the ServicesBar composition, search bar, category pills, scroll arrows, channel grid, favorite/download buttons — all identical to the original maquette.
+    54→    54→- Ported ExplorerScreen.tsx with similar changes:
+    55→    55→    * Replaced `import { POPULAR_PLATFORMS, RECOMMENDED_CHANNELS } from '../data/mockData'` with a single useEffect fetch to `/api/catalog?type=all&page=1` (or `&search=` when the user types).
+    56→    56→    * The search input now triggers a server-side fetch (debounce via React's natural re-render cycle on each keystroke — fine for the maquette).
+    57→    57→    * Added GridCardSkeleton shown during loading (12 cards).
+    58→    58→    * Added error state UI.
+    59→    59→    * Kept all filters (category, service, quality), grid layout, hover effects, badges, etc.
+    60→    60→- Ported FavorisScreen.tsx with one necessary interface deviation: changed `favorites: string[]` to `favorites: StreamItem[]` (full items) because the original filtered from POPULAR_PLATFORMS + RECOMMENDED_CHANNELS (mock data) to find items by ID. Without mock data, the App must pass the actual favorite items (which it fetches from /api/favorites). The other callbacks (onToggleFavorite: (id: string) => void, onSelectItem, onGoToExplorer) are unchanged.
+    61→    61→- Ported SecureBrowserModal.tsx (691 → ~480 lines) with the required changes:
+    62→    62→    * REMOVED the entire URL/address bar section (the lock icon, domain name, "/films/{item.id}.html" path, and "SSL Sécurisé" badge). Kept the back/refresh buttons on the left and moved the "uBlock X pubs bloquées" pill to the left action group.
+    63→    63→    * REPLACED the `<video>` tag with an `<iframe>` whose `src` is `currentEpisode?.videoUrl || currentServer?.videoUrl || \`/api/proxy?page=${item.id}\``. The scraper's getServers() returns a single server with `videoUrl: /api/proxy?page=${newsid}`, so the iframe always ends up loading our filtered proxy.
+    64→    64→    * iframe has `sandbox="allow-scripts allow-same-origin allow-forms allow-presentation allow-popups"` and `allow="autoplay; fullscreen; encrypted-media; picture-in-picture"` and `referrerPolicy="no-referrer"`.
+    65→    65→    * Added `iframeKey` state so the "refresh" button can force-reload the iframe (re-running the ad filter).
+    66→    66→    * KEPT the player controls overlay (timeline scrubber, play/pause, replay_10/forward_10, volume slider, fullscreen, hoster badge) — they are visually identical to the maquette but the timeline/volume are decorative for the cross-origin iframe (still functional UI state).
+    67→    67→    * KEPT the server selector, episode selector, media details (poster, title, director, actors, description), uBlock protection banner.
+    68→    68→    * REPLACED the simulated "Site Complet (Nettoyé)" view with the same filtered iframe shown full-height (no controls overlay) + the red "uBlock a supprimé 4 bannières..." banner + a "Revenir au lecteur cinématique" button.
+    69→    69→    * Kept the embedded UBlockModal trigger.
+    70→    70→- Created /home/z/my-project/src/components/guyma/GuymaApp.tsx orchestrator that mirrors the original App.tsx logic:
+    71→    71→    * State: currentTab, hasStartedExperience, isUpgradeOpen, settings (with INITIAL_USER_SETTINGS inline), services, selectedServiceId, favoriteItems (StreamItem[]), downloads, activeItem, modalInfo, isUBlockOpen, toastMessage.
+    72→    72→    * Derived `favoriteIds = favoriteItems.map(f => f.id)` passed to Dashboard/Explorer/SecureBrowserModal for the heart-icon state.
+    73→    73→    * `favoriteItems` (StreamItem[]) passed to FavorisScreen.
+    74→    74→    * On mount: fetch /api/services, /api/favorites, /api/downloads (all best-effort, silent failures).
+    75→    75→    * `handleToggleFavorite(id)`: optimistic update + DELETE if exists, or POST /api/favorites with {id, title, imageUrl, platform, quality} after looking up the item from favoriteItems cache, activeItem, or fetching /api/details?id= as a fallback.
+    76→    76→    * `handleStartDownload(item)`: optimistic local add with status='downloading', POST /api/downloads for persistence, setInterval-based progress simulation (8% → 100% over ~3s), toast on completion.
+    77→    77→    * `handleDeleteDownload(id)`: clear any in-flight interval, optimistic local remove, DELETE /api/downloads.
+    78→    78→    * `handlePlayDownloadedItem(download)`: reconstructs a minimal StreamItem from the download and sets it as activeItem — the SecureBrowserModal will load /api/proxy?page=streamItemId.
+    79→    79→    * `handleOpenServicePortal(service)`: sets activeItem to a minimal StreamItem whose id is the service.id, so the SecureBrowserModal loads /api/proxy?page=service.id.
+    80→    80→    * Global keyboard nav (1-5 to switch tabs, T to toggle TV mode) — identical to original.
+    81→    81→    * Document.title sync based on isUpgradeOpen.
+    82→    82→    * Layout: `min-h-screen w-full flex flex-col` with `main` set to `flex-grow flex flex-col` and BottomNavBar naturally pushed to the bottom on mobile (sticky footer pattern).
+    83→    83→- Replaced /home/z/my-project/src/app/page.tsx with a "use client" page that dynamically imports GuymaApp with `ssr: false` and a loading splash ("guymaTV" text on the dark surface background). This avoids any SSR/hydration concerns with the heavy client-only app and gives a clean loading state while the JS bundle loads.
+    84→    84→- Verified each component file starts with "use client"; verified all imports use the "@/lib/types" and "@/lib/uBlockEngine" aliases; verified no @google/genai or Gemini references anywhere; verified no imports from the original mockData.ts.
+    85→    85→
+    86→    86→Stage Summary:
+    87→    87→- artifacts produced:
+    88→    88→    * /home/z/my-project/src/lib/uBlockEngine.ts (ported service, singleton export)
+    89→    89→    * /home/z/my-project/src/components/guyma/Header.tsx
+    90→    90→    * /home/z/my-project/src/components/guyma/BottomNavBar.tsx
+    91→    91→    * /home/z/my-project/src/components/guyma/WelcomeScreen.tsx
+    92→    92→    * /home/z/my-project/src/components/guyma/InfoModal.tsx
+    93→    93→    * /home/z/my-project/src/components/guyma/ServicesBar.tsx
+    94→    94→    * /home/z/my-project/src/components/guyma/UBlockModal.tsx
+    95→    95→    * /home/z/my-project/src/components/guyma/UpgradeScreen.tsx
+    96→    96→    * /home/z/my-project/src/components/guyma/SettingsScreen.tsx
+    97→    97→    * /home/z/my-project/src/components/guyma/DownloadsScreen.tsx
+    98→    98→    * /home/z/my-project/src/components/guyma/DashboardScreen.tsx (with API fetches + skeletons)
+    99→    99→    * /home/z/my-project/src/components/guyma/ExplorerScreen.tsx (with API fetches + skeletons)
+   100→   100→    * /home/z/my-project/src/components/guyma/FavorisScreen.tsx (interface changed: favorites: StreamItem[])
+   101→   101→    * /home/z/my-project/src/components/guyma/SecureBrowserModal.tsx (iframe to /api/proxy, URL bar removed, player controls kept)
+   102→   102→    * /home/z/my-project/src/components/guyma/GuymaApp.tsx (orchestrator)
+   103→   103→    * /home/z/my-project/src/app/page.tsx (renders <GuymaApp /> via dynamic ssr: false)
+   104→   104→
+   105→   105→- Deviations from the original (with justifications):
+   106→   106→    1. FavorisScreen.tsx interface changed from `favorites: string[]` to `favorites: StreamItem[]` — necessary because the original filtered from mock data by ID, but without mock data the App must pass the actual favorite items (fetched from /api/favorites which returns StreamItem[]). The other callbacks (onToggleFavorite: (id: string) => void, onSelectItem, onGoToExplorer) are unchanged.
+   107→   107→    2. SecureBrowserModal.tsx: removed the URL bar section (lock icon + domain + path + "SSL Sécurisé" badge) per the task spec. Replaced the `<video>` tag with an `<iframe>` loading `/api/proxy?page=${item.id}` (the filtered proxy). Player controls overlay kept visually but timeline/volume are decorative since the iframe is cross-origin (can't be controlled from outside). The "Site Complet (Nettoyé)" view is replaced with the same filtered iframe shown without controls overlay (no more simulated French-Stream HTML).
+   108→   108→    3. SettingsScreen.tsx: removed the broken avatar `<img>` (it referenced an aida-public Google URL that doesn't exist) — kept the existing gradient + Material person icon fallback that was already rendered behind the image.
+   109→   109→    4. DashboardScreen.tsx and ExplorerScreen.tsx: added loading skeletons (CardSkeleton, ChannelSkeleton, GridCardSkeleton) and error state UIs (cloud_off icon) — these are new UI states that didn't exist in the original because mock data was always synchronously available.
+   110→   110→    5. GuymaApp.tsx: `favorites` is now `favoriteItems: StreamItem[]` (with a derived `favoriteIds: string[]` for the toggle button state) instead of a plain `string[]` — necessary to back the FavorisScreen with real data. The toggle handler resolves the full StreamItem from the cache or fetches /api/details?id= when needed, before POSTing to /api/favorites.
+   111→   111→    6. page.tsx uses `next/dynamic` with `ssr: false` and a simple "guymaTV" loading splash — avoids any SSR/hydration mismatch concerns with the document.title mutation and gives a clean loading state.
+   112→   112→    7. The original App.tsx's `INITIAL_USER_SETTINGS` came from mockData.ts. I inlined the same initial settings directly in GuymaApp.tsx (without the avatarUrl field which is no longer used).
+   113→   113→
+   114→   114→---
+   115→   115→Task ID: 5-11-backend
+   116→   116→Agent: main (Z.ai Code)
+   117→   117→Task: Build the real backend (scraping french-stream.net, filtered proxy, persistence) and verify end-to-end with Agent Browser.
+   118→   118→
+   119→   119→Work Log:
+   120→   120→- Installed cheerio for HTML parsing.
+   121→   121→- Created /home/z/my-project/src/lib/types.ts (ported types, no IA references).
+   122→   122→- Created /home/z/my-project/src/lib/scraper.ts:
+   123→   123→  * getCatalog(opts) — scrapes /films/, /series/, / page listings.
+   124→   124→  * getDetails(newsid) — scrapes /index.php?newsid=XXX detail page.
+   125→   125→  * getServices() — exposes french-stream as the single real service.
+   126→   126→  * getServers(newsid) — exposes a single "secure player" server pointing to /api/proxy.
+   127→   127→  * CATEGORIES — site's category nav mapping.
+   128→   128→  * In-memory cache (5 min TTL) to reduce source site load.
+   129→   129→  * Title cleanup: strips trailing "affiche", "- YYYY", "(YYYY)" and collapses whitespace.
+   130→   130→  * Search fallback: site's /do=search is 302-protected, so we scrape 3 catalog pages and filter by title/description/tags server-side.
+   131→   131→- Created API routes (all under /home/z/my-project/src/app/api/):
+   132→   132→  * catalog/route.ts  — GET /api/catalog?type=films|series|all&page=N&search=Q
+   133→   133→  * details/route.ts  — GET /api/details?id=XXX
+   134→   134→  * services/route.ts — GET /api/services
+   135→   135→  * categories/route.ts — GET /api/categories
+   136→   136→  * servers/route.ts  — GET /api/servers?id=XXX
+   137→   137→  * proxy/route.ts    — GET /api/proxy?page=XXX (THE FILTERED PROXY)
+   138→   138→  * favorites/route.ts — GET/POST/DELETE
+   139→   139→  * downloads/route.ts — GET/POST/DELETE (with background progress simulation)
+   140→   140→- Prisma schema updated: prisma/schema.prisma with Favorite and Download models. Pushed to SQLite via `bun run db:push`.
+   141→   141→- Proxy filtering details (the "invisible browser" core):
+   142→   142→  * 80+ blocked ad/tracker/adult domains (doubleclick, exoclick, trafficjunky, histats, popads, adsterra, propellerads, fsurl.lol, crypto miners, etc.)
+   143→   143→  * cheerio strip: <script> from blocked domains, <iframe> from blocked domains, <link> preconnect/dns-prefetch to blocked domains, common ad container selectors ([class*=ad-], [class*=banner], .fssts-card, [onclick*=window.open], etc.)
+   144→   144→  * Injected JS neutralizer (prepended to <head>): overrides window.open (no-op), alert/confirm/prompt, location.assign/replace to blocked domains, document.write of ad scripts, createElement('script') src setter, MutationObserver to nuke ad nodes injected post-load.
+   145→   145→  * Injected CSS: hides any ad remnants, forces dark bg to match guymaTV theme, hides site's own nav/header (irrelevant in our wrapper).
+   146→   146→  * <base href="https://french-stream.net/"> injected so relative URLs resolve to source.
+   147→   147→  * Response headers: X-Frame-Options: ALLOWALL, permissive CSP so the iframe can load cross-origin video hosters.
+   148→   148→- Verified end-to-end with Agent Browser:
+   149→   149→  * Page loads, splash screen "Commencer l'expérience" works.
+   150→   150→  * Dashboard shows 18 REAL movies scraped from french-stream.net (La Bataille de Gaulle, Soulm8te, Ed Kemper, Space/Time, etc.) with TMDB poster images.
+   151→   151→  * Click "Lancer le stream" → SecureBrowserModal opens, iframe loads /api/proxy?page=15128265, console shows [fss-wprog] news_id= 15128265 (source JS running inside our filtered iframe).
+   152→   152→  * Favorite toggle persists to SQLite (verified via /api/favorites GET → returns the added item).
+   153→   153→  * Download simulation completes to 100% and persists to SQLite.
+   154→   154→  * Navigation between all 5 tabs works (Accueil, Explorer, Favoris, Téléchargements, Paramètres).
+   155→   155→  * Mobile viewport (390×844) renders correctly with compact header + bottom nav.
+   156→   156→  * No runtime errors in dev.log.
+   157→   157→
+   158→   158→Stage Summary:
+   159→   159→- guymaTV is now a fully functional wrapper around french-stream.net:
+   160→   160→  * Catalog of real movies/series (no mock data).
+   161→   161→  * "Invisible browser" via /api/proxy — the user never sees a URL bar, only guymaTV branded chrome around a filtered iframe.
+   162→   162→  * Ads/popups/trackers/adult banners surgically removed at the HTML level + neutralized at the JS level (window.open override, MutationObserver).
+   163→   163→  * Favorites + Downloads persist to SQLite via Prisma.
+   164→   164→  * Maquette UI preserved exactly (Material 3 olive/emerald, Sora + Plus Jakarta Sans, Material Symbols Outlined icons).
+   165→   165→  * No IA anywhere (no @google/genai, no Gemini, no LLM calls).
+   166→   166→- Ready for next phase: APK packaging (Capacitor), additional source sites, real video URL extraction (Playwright-based for JS-rendered player pages).
+   167→   167→
+   168→   168→---
+   169→   169→Task ID: 7-video-player
+   170→   170→Agent: full-stack-developer
+   171→   171→Task: Update SecureBrowserModal.tsx to fetch real extracted servers from /api/extract, render a native <video> element (with working controls) when the URL is a direct mp4/m3u8/webm and fall back to the <iframe> proxy when not. Remove the "Site Complet (Nettoyé)" view mode toggle. Preserve the maquette chrome.
+   172→   172→
+   173→   173→Work Log:
+   174→   174→- Read /home/z/my-project/worklog.md to absorb the project context (tasks 4-ui-port + 5-11-backend) and read the full existing SecureBrowserModal.tsx (645 lines) plus /api/extract/route.ts, src/lib/api-client.ts, src/lib/types.ts, and the Playwright extractor's StreamServer shape.
+   175→   175→- Rewrote /home/z/my-project/src/components/guyma/SecureBrowserModal.tsx from 645 → 808 lines with the following changes:
+   176→   176→  * Added `import { apiUrl } from "@/lib/api-client"` and `useCallback` to the React import. All fetch and proxy URLs now go through `apiUrl()` so the modal works both in dev (relative) and in APK builds (absolute backend URL via NEXT_PUBLIC_API_BASE_URL).
+   177→   177→  * Added a module-level helper `isDirectVideo(url)`: returns false for `/api/proxy...`, true for any `http(s)://` URL or any `.mp4`/`.m3u8`/`.webm` URL. Used to choose between native `<video>` and the iframe fallback.
+   178→   178→  * Replaced the inline `servers` const (which previously synthesized a single proxy server from `item.servers || fallback`) with real server-fetch state: `servers: StreamServer[]`, `serversLoading: boolean`. A `useEffect` on `[item.id, buildProxyFallback]` calls `fetch(apiUrl("/api/extract?id=..."))`, parses the JSON (accepting either `StreamServer[]` or `{ servers: StreamServer[] }`), populates `servers`, and falls back to a single proxy server (`/api/proxy?page=...`) on any error or empty result.
+   179→   179→  * Added a `buildProxyFallback` useCallback that builds a `StreamServer` with `name: "Lecteur Sécurisé (proxy)"`, `videoUrl: apiUrl("/api/proxy?page=...")` — so the proxy fallback path is correctly labeled per the spec.
+   180→   180→  * Added `videoRef: useRef<HTMLVideoElement>` alongside the existing `containerRef`.
+   181→   181→  * Added a `switchingServer` state shown as a spinner overlay (z-30, bg-black/60 backdrop-blur) over the player stage while a new server/episode is loading. It clears via the video's `onLoadedData`/`onCanPlay`/`onPlaying` events (native path) or the iframe's `onLoad` event (fallback path).
+   182→   182→  * REMOVED the `viewMode` state, the center "Lecteur Stream / Site Complet (Nettoyé)" View Switcher in the top action bar, and the entire "MODE 2: AUTHENTIC SITE VIEW" block (the red uBlock banner + filtered iframe + "Revenir au lecteur cinématique" button). Only the cinematic player view remains, per spec.
+   183→   183→  * Smart rendering in the player stage:
+   184→   184→      - `serversLoading === true` → a centered spinner + "Extraction des lecteurs en cours…" + "Analyse de la page source via Playwright (~10-15s au premier appel)" subtext on a `bg-surface-container-low` backdrop.
+   185→   185→      - `isDirectVideo(currentVideoUrl) === true` → `<video ref={videoRef} src={currentVideoUrl} autoPlay playsInline controls={false}>` with event handlers: `onPlay`/`onPause` toggle `isPlaying`; `onTimeUpdate` updates `currentTime`; `onLoadedMetadata` + `onDurationChange` set `duration`; `onVolumeChange` syncs `volume` + `isMuted`; `onLoadedData`/`onCanPlay`/`onPlaying` clear `switchingServer`; `onWaiting` sets it; `onClick` toggles play.
+   186→   186→      - else (proxy fallback) → the original `<iframe>` with the same `sandbox`, `allow`, `referrerPolicy` and `secure-iframe` class, `onLoad` clears `switchingServer`.
+   187→   187→  * Wired every player control to the video element via `videoRef.current`:
+   188→   188→      - Play/Pause button (both the big center one and the bottom-bar one) calls `togglePlay()` which does `v.paused ? v.play() : v.pause()`.
+   189→   189→      - Timeline scrubber div uses `handleSeek(e)` → computes `pos = (clientX - rect.left) / rect.width`, sets `v.currentTime = pos * v.duration`. Width fill uses `timelinePct = duration > 0 ? (currentTime / duration) * 100 : 0`.
+   190→   190→      - Time display: `formatSeconds(currentTime) / formatSeconds(duration)` (e.g. `12:34 / 1:48:21`).
+   191→   191→      - Skip ±10s buttons call `skipBy(±10)` → `v.currentTime = clamp(v.currentTime + delta, 0, v.duration)`.
+   192→   192→      - Volume slider `onChange` calls `handleVolumeChange` → sets `v.volume = newVol/100`, `v.muted = false`, syncs React state.
+   193→   193→      - Mute button calls `toggleMute()` → flips `v.muted`.
+   194→   194→      - Fullscreen button calls `toggleFullscreen()` → `containerRef.current.requestFullscreen()`. A `fullscreenchange` listener keeps the icon in sync when the user exits fullscreen via Esc.
+   195→   195→  * Keyboard shortcuts now also drive the video element: Space/Enter → `togglePlay()`; ArrowLeft/Right → `skipBy(∓10)`; ArrowUp/Down → adjust `v.volume`; M → `toggleMute()`; F → `toggleFullscreen()`; Esc → close modal only when not in fullscreen (so Esc exits fullscreen first instead of closing the modal).
+   196→   196→  * Server selector: lists the extracted servers as buttons. While `serversLoading`, shows 3 pulsing skeleton buttons. Each button's label comes from `serverLabel(srv)` — returns "Lecteur Sécurisé (proxy)" when the server's `videoUrl` is NOT a direct video (i.e. the proxy fallback), otherwise the server's `name` (or `hoster`). The `title` attribute shows `${hoster} • ${quality} • ${language}` for direct servers or "Lecteur proxy filtré (repli)" for the proxy. Clicking a different server calls `handleServerSwitch(idx)` which sets `switchingServer=true`, resets `selectedServerIndex`, `selectedEpisodeIndex`, `currentTime`, `duration`, and `isPlaying`.
+   197→   197→  * The episode selector's `onClick` now goes through `handleEpisodeSwitch(idx)` (same switching logic).
+   198→   198→  * The refresh button (`handleRefresh`) keeps the existing uBlock inspection + `blockedAdsOnPage++` + `iframeKey++` behavior AND, for the native video path, force-reloads the video by removing/re-assigning `src`, calling `v.load()`, and `v.play()`.
+   199→   199→  * Preserved IDENTICALLY (no className changes, no icon changes, no layout changes): the modal outer chrome (fixed inset-0 z-50, backdrop-blur, animate-fade-in), the `containerRef` card (`max-w-6xl bg-surface-container-high rounded-2xl h-[94vh]`), the top action bar (back/refresh buttons, "X pubs bloquées" pill, uBlock trigger, Télécharger, favorite, fullscreen, close), the watermark, the quality badge, the big center play/pause button, the bottom control overlay (timeline + buttons row with `currentServer.hoster` badge), the streaming controls bar, the episode selector, the media details (poster + title + director/actors + description + uBlock protection banner), and the UBlockModal trigger. All Material Symbols Outlined icons (`<span className="material-symbols-outlined">…</span>`) preserved.
+   200→   200→  * File still starts with `"use client";`. No Lucide, no shadcn/ui imports, no other files modified.
+   201→   201→
+   202→   202→Stage Summary:
+   203→   203→- artifacts produced:
+   204→   204→    * /home/z/my-project/src/components/guyma/SecureBrowserModal.tsx (rewritten, 645 → 808 lines) — now fetches real extracted servers from `/api/extract?id=...`, renders a native `<video>` element with fully-wired controls (play/pause, timeline scrub, volume, mute, skip ±10s, fullscreen, time display) when the resolved `videoUrl` is a direct mp4/m3u8/webm/http URL, and falls back to the existing filtered `<iframe>` proxy when extraction fails or returns `[]`. The "Site Complet (Nettoyé)" view mode toggle is removed. The maquette chrome, Material 3 olive/emerald theme, and Material Symbols Outlined icons are preserved identically.
+   205→   205→
+   206→   206→---
+   207→   207→Task ID: A-C-playwright-capacitor
+   208→   208→Agent: main (Z.ai Code)
+   209→   209→Task: (A) Configure Capacitor + GitHub Actions for APK build, (C) Playwright-based direct video URL extraction replacing the iframe proxy.
+   210→   210→
+   211→   211→Work Log:
+   212→   212→- Installed: @capacitor/core @capacitor/cli @capacitor/android @capacitor/app @capacitor/haptics @capacitor/keyboard @capacitor/status-bar, playwright, hls.js
+   213→   213→- Installed Chromium for Playwright via `bunx playwright install chromium`
+   214→   214→- Created /home/z/my-project/src/lib/video-extractor.ts:
+   215→   215→  * Singleton Chromium browser instance (reused across requests)
+   216→   216→  * 30-min in-memory cache per newsid
+   217→   217→  * 80+ blocked ad/tracker domains blocked at the network layer (function matcher for Playwright v1.63+ compat)
+   218→   218→  * Strategy 1: network request interception for .mp4/.m3u8 (master playlist preferred, segments .ts/.m4s excluded)
+   219→   219→  * Strategy 2: <video>/<source> DOM extraction
+   220→   220→  * Strategy 3: window.sources JS variable probe
+   221→   221→  * Navigates to french-stream.net movie page, removes anti-bot overlay (#dontfoid, [znid]), clicks .player-option buttons (Uqload, Dood, Vidoza, ViDZY, etc.) with force:true, collects hoster iframes, extracts direct URLs from each
+   222→   222→  * Always includes /api/proxy fallback as last resort
+   223→   223→- Created /home/z/my-project/src/app/api/extract/route.ts — GET /api/extract?id=xxx with 60s maxDuration
+   224→   224→- Updated /home/z/my-project/src/app/api/servers/route.ts to call extractVideoServers (was returning static proxy)
+   225→   225→- Updated HOSTERS regex to match real domains: uqload.(com|vc|io|net|co), vidoza.(net|io|co|org), dood(stream|so|watch|pm|cx|to), mixdrop.(co|to|ag|pz|mv), voe?stream.(com|sx|net), filmoon, vidzy
+   226→   226→- Created /home/z/my-project/src/lib/api-client.ts:
+   227→   227→  * apiUrl(path) helper with priority resolution: window.__API_BASE_URL__ (runtime) > NEXT_PUBLIC_API_BASE_URL (build-time) > "" (relative)
+   228→   228→  * apiFetch wrapper
+   229→   229→- Refactored all fetch calls in GuymaApp, DashboardScreen, ExplorerScreen to use apiUrl() — APK will call deployed backend
+   230→   230→- Updated SecureBrowserModal (via subagent Task 7-video-player):
+   231→   231→  * Fetches /api/extract on mount with loading state ("Extraction des lecteurs en cours…")
+   232→   232→  * isDirectVideo(url) determines <video> vs <iframe> rendering
+   233→   233→  * Native <video> with full player controls wired via refs (play/pause, timeline, volume, fullscreen, skip ±10s)
+   234→   234→  * Server selector showing extracted hosters (Uqload, ViDZY, etc.)
+   235→   235→  * Removed viewMode toggle (no more "Site Complet" view — only player)
+   236→   236→- Added hls.js integration for .m3u8 streams:
+   237→   237→  * Dynamic import only when needed
+   238→   238→  * Native HLS for Safari/iOS (no hls.js needed)
+   239→   239→  * hls.js for Chrome/Firefox/WebView
+   240→   240→  * MANIFEST_PARSED event triggers autoplay
+   241→   241→- Created Capacitor config (/home/z/my-project/capacitor.config.ts):
+   242→   242→  * appId: tv.guyma.app
+   243→   243→  * webDir: mobile/www
+   244→   244→  * Dark theme (#0f1412)
+   245→   245→  * allowMixedContent: true (some video hosters use HTTP)
+   246→   246→  * SplashScreen + StatusBar + Keyboard plugins configured
+   247→   247→- Updated next.config.ts with dual mode:
+   248→   248→  * Default (dev/server): output: 'standalone'
+   249→   249→  * GUymA_MOBILE_BUILD=1: output: 'export' to ./mobile/www with unoptimized images
+   250→   250→  * serverExternalPackages: playwright, cheerio, @prisma/client
+   251→   251→- Created /home/z/my-project/scripts/build-mobile.sh:
+   252→   252→  * Temporarily moves src/app/api OUTSIDE src/app (to .mobile-excluded/) so Next doesn't see it as a route folder
+   253→   253→  * Builds with GUYMA_MOBILE_BUILD=1 + NEXT_PUBLIC_API_BASE_URL
+   254→   254→  * Injects window.__API_BASE_URL__ into all HTML files (runtime override)
+   255→   255→  * Restores src/app/api via trap on exit (even on error)
+   256→   256→- Created /home/z/my-project/.github/workflows/build-apk.yml:
+   257→   257→  * Triggers: tag push v*.*.* OR manual workflow_dispatch (debug/release/both)
+   258→   258→  * Steps: checkout → setup Bun + Java 17 + Android SDK 33 → bun install → mobile build → cap add android → cap sync → configure network_security_config for cleartext → gradle assembleDebug/Release → upload APK artifact
+   259→   259→  * Supports signed release via ANDROID_KEYSTORE_BASE64 + ANDROID_KEYSTORE_PASSWORD + ANDROID_KEY_ALIAS + ANDROID_KEY_PASSWORD secrets
+   260→   260→  * Build summary in $GITHUB_STEP_SUMMARY with install instructions
+   261→   261→- Updated package.json: name=guymatv, version=1.0.0, added scripts: build:mobile, cap:sync, cap:add:android, apk:debug, apk:release, apk:clean
+   262→   262→- Updated .gitignore: mobile/www, android/, *.apk, *.aab, *.keystore, playwright-report/, ios/
+   263→   263→- Created /home/z/my-project/MOBILE.md: full deployment guide (Render/Railway/Fly.io/VPS), GitHub Actions setup, signed release, local build, troubleshooting, Play Store checklist
+   264→   264→- Verified end-to-end with Agent Browser:
+   265→   265→  * Clicked "Lancer le stream" on "La Bataille de Gaulle : L'Âge de fer"
+   266→   266→  * Modal opened, showed "Extraction des lecteurs en cours…" for ~40s (Playwright running)
+   267→   267→  * After extraction: native <video> element appeared, loaded https://v6.vidzy.cc/hls2/.../master.m3u8 via hls.js
+   268→   268→  * Video playing: currentTime=34.6s, duration=6506s (~1h48), videoWidth=867, videoHeight=488, readyState=4, paused=false
+   269→   269→  * ZERO errors in console, ZERO errors in agent-browser errors
+   270→   270→  * Verified mobile build works: GUYMA_MOBILE_BUILD=1 + GUYMA_API_BASE_URL=https://api.guyma.tv → mobile/www/index.html generated with API URL injected (verified via grep)
+   271→   271→  * Verified src/app/api is properly restored after mobile build
+   272→   272→
+   273→   273→Stage Summary:
+   274→   274→- guymaTV now extracts DIRECT video URLs via Playwright (no more iframe-of-the-whole-page):
+   275→   275→  * Playwright launches headless Chromium, navigates to french-stream.net movie page
+   276→   276→  * Blocks 80+ ad/tracker domains at network layer
+   277→   277→  * Removes anti-bot overlay divs (#dontfoid)
+   278→   278→  * Clicks .player-option buttons (Uqload, ViDZY, Dood, Vidoza, etc.) with force:true
+   279→   279→  * Follows each hoster iframe, intercepts network requests for .mp4/.m3u8
+   280→   280→  * Returns StreamServer[] with direct video URLs
+   281→   281→  * Client plays them in native <video> with hls.js (for .m3u8) — full controls, no ads, no popups
+   282→   282→  * Proxy iframe (/api/proxy) kept as fallback if extraction fails
+   283→   283→- APK build pipeline ready via GitHub Actions:
+   284→   284→  * Push tag v1.0.0 → workflow builds debug + release APKs → uploads as artifacts
+   285→   285→  * Manual dispatch from Actions tab (debug/release/both)
+   286→   286→  * Backend deployed separately (Render/Railway/Fly.io/VPS), APK points to it via GUYMA_API_BASE_URL secret
+   287→   287→  * Runtime override via window.__API_BASE_URL__ allows re-pointing APK without rebuild
+   288→   288→- Architecture: Static APK frontend (Capacitor) ←→ Deployed Next.js backend (Playwright + Prisma + scraping) ←→ french-stream.net
+   289→   289→
