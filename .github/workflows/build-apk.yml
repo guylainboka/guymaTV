@@ -61,11 +61,22 @@ jobs:
           java-version: ${{ env.JAVA_VERSION }}
 
       - name: 🤖 Setup Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          api-level: ${{ env.ANDROID_SDK_VERSION }}
-          build-tools-version: "34.0.0"
-          ndk-version: "27.0.12077973"
+        run: |
+          # The ubuntu-latest runner already has Android SDK pre-installed.
+          # We just need to accept licenses and install the required components.
+          export ANDROID_HOME=$ANDROID_SDK_ROOT
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          
+          # Accept all Android SDK licenses
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          
+          # Install required SDK components
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" > /dev/null 2>&1 || true
+          
+          # Verify installation
+          sdkmanager --list_installed 2>/dev/null | head -20 || sdkmanager --list 2>/dev/null | head -20
+          echo "✅ Android SDK ready"
 
       - name: 📦 Install dependencies
         run: bun install --frozen-lockfile
