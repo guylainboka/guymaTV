@@ -21,6 +21,7 @@ import { UpgradeScreen } from "./UpgradeScreen";
 import { SecureBrowserModal } from "./SecureBrowserModal";
 import { UBlockModal } from "./UBlockModal";
 import { InfoModal } from "./InfoModal";
+import { apiUrl } from "@/lib/api-client";
 
 const INITIAL_USER_SETTINGS: UserSettings = {
   name: "Alexandre Guy",
@@ -85,7 +86,7 @@ export default function GuymaApp() {
   // -------- Fetch services on mount --------
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/services")
+    fetch(apiUrl("/api/services"))
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
       .then((data: StreamService[]) => {
         if (!cancelled && Array.isArray(data)) setServices(data);
@@ -101,7 +102,7 @@ export default function GuymaApp() {
   // -------- Fetch favorites on mount --------
   const refreshFavorites = useCallback(async () => {
     try {
-      const r = await fetch("/api/favorites");
+      const r = await fetch(apiUrl("/api/favorites"));
       if (!r.ok) return;
       const data = (await r.json()) as StreamItem[];
       if (Array.isArray(data)) setFavoriteItems(data);
@@ -117,7 +118,7 @@ export default function GuymaApp() {
   // -------- Fetch downloads on mount --------
   const refreshDownloads = useCallback(async () => {
     try {
-      const r = await fetch("/api/downloads");
+      const r = await fetch(apiUrl("/api/downloads"));
       if (!r.ok) return;
       const data = (await r.json()) as DownloadItem[];
       if (Array.isArray(data)) setDownloads(data);
@@ -185,7 +186,7 @@ export default function GuymaApp() {
         // Optimistic removal
         setFavoriteItems((prev) => prev.filter((f) => f.id !== id));
         try {
-          await fetch(`/api/favorites?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+          await fetch(apiUrl(`/api/favorites?id=${encodeURIComponent(id)}`), { method: "DELETE" });
         } catch {
           /* silent */
         }
@@ -200,7 +201,7 @@ export default function GuymaApp() {
 
       if (!item) {
         try {
-          const r = await fetch(`/api/details?id=${encodeURIComponent(id)}`);
+          const r = await fetch(apiUrl(`/api/details?id=${encodeURIComponent(id)}`));
           if (r.ok) item = (await r.json()) as StreamItem;
         } catch {
           /* silent */
@@ -227,7 +228,7 @@ export default function GuymaApp() {
       setFavoriteItems((prev) => [item as StreamItem, ...prev]);
 
       try {
-        await fetch("/api/favorites", {
+        await fetch(apiUrl("/api/favorites"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -278,7 +279,7 @@ export default function GuymaApp() {
       showToast(`Téléchargement lancé sans pub : ${item.title}`);
 
       // Persist to backend (best-effort).
-      fetch("/api/downloads", {
+      fetch(apiUrl("/api/downloads"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -358,7 +359,7 @@ export default function GuymaApp() {
     setDownloads((prev) => prev.filter((d) => d.id !== downloadId));
     showToast("Fichier téléchargé supprimé de l'appareil");
 
-    fetch(`/api/downloads?id=${encodeURIComponent(downloadId)}`, {
+    fetch(apiUrl(`/api/downloads?id=${encodeURIComponent(downloadId)}`), {
       method: "DELETE",
     }).catch(() => {
       /* silent */

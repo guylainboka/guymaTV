@@ -164,3 +164,125 @@ Stage Summary:
   * Maquette UI preserved exactly (Material 3 olive/emerald, Sora + Plus Jakarta Sans, Material Symbols Outlined icons).
   * No IA anywhere (no @google/genai, no Gemini, no LLM calls).
 - Ready for next phase: APK packaging (Capacitor), additional source sites, real video URL extraction (Playwright-based for JS-rendered player pages).
+
+---
+Task ID: 7-video-player
+Agent: full-stack-developer
+Task: Update SecureBrowserModal.tsx to fetch real extracted servers from /api/extract, render a native <video> element (with working controls) when the URL is a direct mp4/m3u8/webm and fall back to the <iframe> proxy when not. Remove the "Site Complet (Nettoyé)" view mode toggle. Preserve the maquette chrome.
+
+Work Log:
+- Read /home/z/my-project/worklog.md to absorb the project context (tasks 4-ui-port + 5-11-backend) and read the full existing SecureBrowserModal.tsx (645 lines) plus /api/extract/route.ts, src/lib/api-client.ts, src/lib/types.ts, and the Playwright extractor's StreamServer shape.
+- Rewrote /home/z/my-project/src/components/guyma/SecureBrowserModal.tsx from 645 → 808 lines with the following changes:
+  * Added `import { apiUrl } from "@/lib/api-client"` and `useCallback` to the React import. All fetch and proxy URLs now go through `apiUrl()` so the modal works both in dev (relative) and in APK builds (absolute backend URL via NEXT_PUBLIC_API_BASE_URL).
+  * Added a module-level helper `isDirectVideo(url)`: returns false for `/api/proxy...`, true for any `http(s)://` URL or any `.mp4`/`.m3u8`/`.webm` URL. Used to choose between native `<video>` and the iframe fallback.
+  * Replaced the inline `servers` const (which previously synthesized a single proxy server from `item.servers || fallback`) with real server-fetch state: `servers: StreamServer[]`, `serversLoading: boolean`. A `useEffect` on `[item.id, buildProxyFallback]` calls `fetch(apiUrl("/api/extract?id=..."))`, parses the JSON (accepting either `StreamServer[]` or `{ servers: StreamServer[] }`), populates `servers`, and falls back to a single proxy server (`/api/proxy?page=...`) on any error or empty result.
+  * Added a `buildProxyFallback` useCallback that builds a `StreamServer` with `name: "Lecteur Sécurisé (proxy)"`, `videoUrl: apiUrl("/api/proxy?page=...")` — so the proxy fallback path is correctly labeled per the spec.
+  * Added `videoRef: useRef<HTMLVideoElement>` alongside the existing `containerRef`.
+  * Added a `switchingServer` state shown as a spinner overlay (z-30, bg-black/60 backdrop-blur) over the player stage while a new server/episode is loading. It clears via the video's `onLoadedData`/`onCanPlay`/`onPlaying` events (native path) or the iframe's `onLoad` event (fallback path).
+  * REMOVED the `viewMode` state, the center "Lecteur Stream / Site Complet (Nettoyé)" View Switcher in the top action bar, and the entire "MODE 2: AUTHENTIC SITE VIEW" block (the red uBlock banner + filtered iframe + "Revenir au lecteur cinématique" button). Only the cinematic player view remains, per spec.
+  * Smart rendering in the player stage:
+      - `serversLoading === true` → a centered spinner + "Extraction des lecteurs en cours…" + "Analyse de la page source via Playwright (~10-15s au premier appel)" subtext on a `bg-surface-container-low` backdrop.
+      - `isDirectVideo(currentVideoUrl) === true` → `<video ref={videoRef} src={currentVideoUrl} autoPlay playsInline controls={false}>` with event handlers: `onPlay`/`onPause` toggle `isPlaying`; `onTimeUpdate` updates `currentTime`; `onLoadedMetadata` + `onDurationChange` set `duration`; `onVolumeChange` syncs `volume` + `isMuted`; `onLoadedData`/`onCanPlay`/`onPlaying` clear `switchingServer`; `onWaiting` sets it; `onClick` toggles play.
+      - else (proxy fallback) → the original `<iframe>` with the same `sandbox`, `allow`, `referrerPolicy` and `secure-iframe` class, `onLoad` clears `switchingServer`.
+  * Wired every player control to the video element via `videoRef.current`:
+      - Play/Pause button (both the big center one and the bottom-bar one) calls `togglePlay()` which does `v.paused ? v.play() : v.pause()`.
+      - Timeline scrubber div uses `handleSeek(e)` → computes `pos = (clientX - rect.left) / rect.width`, sets `v.currentTime = pos * v.duration`. Width fill uses `timelinePct = duration > 0 ? (currentTime / duration) * 100 : 0`.
+      - Time display: `formatSeconds(currentTime) / formatSeconds(duration)` (e.g. `12:34 / 1:48:21`).
+      - Skip ±10s buttons call `skipBy(±10)` → `v.currentTime = clamp(v.currentTime + delta, 0, v.duration)`.
+      - Volume slider `onChange` calls `handleVolumeChange` → sets `v.volume = newVol/100`, `v.muted = false`, syncs React state.
+      - Mute button calls `toggleMute()` → flips `v.muted`.
+      - Fullscreen button calls `toggleFullscreen()` → `containerRef.current.requestFullscreen()`. A `fullscreenchange` listener keeps the icon in sync when the user exits fullscreen via Esc.
+  * Keyboard shortcuts now also drive the video element: Space/Enter → `togglePlay()`; ArrowLeft/Right → `skipBy(∓10)`; ArrowUp/Down → adjust `v.volume`; M → `toggleMute()`; F → `toggleFullscreen()`; Esc → close modal only when not in fullscreen (so Esc exits fullscreen first instead of closing the modal).
+  * Server selector: lists the extracted servers as buttons. While `serversLoading`, shows 3 pulsing skeleton buttons. Each button's label comes from `serverLabel(srv)` — returns "Lecteur Sécurisé (proxy)" when the server's `videoUrl` is NOT a direct video (i.e. the proxy fallback), otherwise the server's `name` (or `hoster`). The `title` attribute shows `${hoster} • ${quality} • ${language}` for direct servers or "Lecteur proxy filtré (repli)" for the proxy. Clicking a different server calls `handleServerSwitch(idx)` which sets `switchingServer=true`, resets `selectedServerIndex`, `selectedEpisodeIndex`, `currentTime`, `duration`, and `isPlaying`.
+  * The episode selector's `onClick` now goes through `handleEpisodeSwitch(idx)` (same switching logic).
+  * The refresh button (`handleRefresh`) keeps the existing uBlock inspection + `blockedAdsOnPage++` + `iframeKey++` behavior AND, for the native video path, force-reloads the video by removing/re-assigning `src`, calling `v.load()`, and `v.play()`.
+  * Preserved IDENTICALLY (no className changes, no icon changes, no layout changes): the modal outer chrome (fixed inset-0 z-50, backdrop-blur, animate-fade-in), the `containerRef` card (`max-w-6xl bg-surface-container-high rounded-2xl h-[94vh]`), the top action bar (back/refresh buttons, "X pubs bloquées" pill, uBlock trigger, Télécharger, favorite, fullscreen, close), the watermark, the quality badge, the big center play/pause button, the bottom control overlay (timeline + buttons row with `currentServer.hoster` badge), the streaming controls bar, the episode selector, the media details (poster + title + director/actors + description + uBlock protection banner), and the UBlockModal trigger. All Material Symbols Outlined icons (`<span className="material-symbols-outlined">…</span>`) preserved.
+  * File still starts with `"use client";`. No Lucide, no shadcn/ui imports, no other files modified.
+
+Stage Summary:
+- artifacts produced:
+    * /home/z/my-project/src/components/guyma/SecureBrowserModal.tsx (rewritten, 645 → 808 lines) — now fetches real extracted servers from `/api/extract?id=...`, renders a native `<video>` element with fully-wired controls (play/pause, timeline scrub, volume, mute, skip ±10s, fullscreen, time display) when the resolved `videoUrl` is a direct mp4/m3u8/webm/http URL, and falls back to the existing filtered `<iframe>` proxy when extraction fails or returns `[]`. The "Site Complet (Nettoyé)" view mode toggle is removed. The maquette chrome, Material 3 olive/emerald theme, and Material Symbols Outlined icons are preserved identically.
+
+---
+Task ID: A-C-playwright-capacitor
+Agent: main (Z.ai Code)
+Task: (A) Configure Capacitor + GitHub Actions for APK build, (C) Playwright-based direct video URL extraction replacing the iframe proxy.
+
+Work Log:
+- Installed: @capacitor/core @capacitor/cli @capacitor/android @capacitor/app @capacitor/haptics @capacitor/keyboard @capacitor/status-bar, playwright, hls.js
+- Installed Chromium for Playwright via `bunx playwright install chromium`
+- Created /home/z/my-project/src/lib/video-extractor.ts:
+  * Singleton Chromium browser instance (reused across requests)
+  * 30-min in-memory cache per newsid
+  * 80+ blocked ad/tracker domains blocked at the network layer (function matcher for Playwright v1.63+ compat)
+  * Strategy 1: network request interception for .mp4/.m3u8 (master playlist preferred, segments .ts/.m4s excluded)
+  * Strategy 2: <video>/<source> DOM extraction
+  * Strategy 3: window.sources JS variable probe
+  * Navigates to french-stream.net movie page, removes anti-bot overlay (#dontfoid, [znid]), clicks .player-option buttons (Uqload, Dood, Vidoza, ViDZY, etc.) with force:true, collects hoster iframes, extracts direct URLs from each
+  * Always includes /api/proxy fallback as last resort
+- Created /home/z/my-project/src/app/api/extract/route.ts — GET /api/extract?id=xxx with 60s maxDuration
+- Updated /home/z/my-project/src/app/api/servers/route.ts to call extractVideoServers (was returning static proxy)
+- Updated HOSTERS regex to match real domains: uqload.(com|vc|io|net|co), vidoza.(net|io|co|org), dood(stream|so|watch|pm|cx|to), mixdrop.(co|to|ag|pz|mv), voe?stream.(com|sx|net), filmoon, vidzy
+- Created /home/z/my-project/src/lib/api-client.ts:
+  * apiUrl(path) helper with priority resolution: window.__API_BASE_URL__ (runtime) > NEXT_PUBLIC_API_BASE_URL (build-time) > "" (relative)
+  * apiFetch wrapper
+- Refactored all fetch calls in GuymaApp, DashboardScreen, ExplorerScreen to use apiUrl() — APK will call deployed backend
+- Updated SecureBrowserModal (via subagent Task 7-video-player):
+  * Fetches /api/extract on mount with loading state ("Extraction des lecteurs en cours…")
+  * isDirectVideo(url) determines <video> vs <iframe> rendering
+  * Native <video> with full player controls wired via refs (play/pause, timeline, volume, fullscreen, skip ±10s)
+  * Server selector showing extracted hosters (Uqload, ViDZY, etc.)
+  * Removed viewMode toggle (no more "Site Complet" view — only player)
+- Added hls.js integration for .m3u8 streams:
+  * Dynamic import only when needed
+  * Native HLS for Safari/iOS (no hls.js needed)
+  * hls.js for Chrome/Firefox/WebView
+  * MANIFEST_PARSED event triggers autoplay
+- Created Capacitor config (/home/z/my-project/capacitor.config.ts):
+  * appId: tv.guyma.app
+  * webDir: mobile/www
+  * Dark theme (#0f1412)
+  * allowMixedContent: true (some video hosters use HTTP)
+  * SplashScreen + StatusBar + Keyboard plugins configured
+- Updated next.config.ts with dual mode:
+  * Default (dev/server): output: 'standalone'
+  * GUymA_MOBILE_BUILD=1: output: 'export' to ./mobile/www with unoptimized images
+  * serverExternalPackages: playwright, cheerio, @prisma/client
+- Created /home/z/my-project/scripts/build-mobile.sh:
+  * Temporarily moves src/app/api OUTSIDE src/app (to .mobile-excluded/) so Next doesn't see it as a route folder
+  * Builds with GUYMA_MOBILE_BUILD=1 + NEXT_PUBLIC_API_BASE_URL
+  * Injects window.__API_BASE_URL__ into all HTML files (runtime override)
+  * Restores src/app/api via trap on exit (even on error)
+- Created /home/z/my-project/.github/workflows/build-apk.yml:
+  * Triggers: tag push v*.*.* OR manual workflow_dispatch (debug/release/both)
+  * Steps: checkout → setup Bun + Java 17 + Android SDK 33 → bun install → mobile build → cap add android → cap sync → configure network_security_config for cleartext → gradle assembleDebug/Release → upload APK artifact
+  * Supports signed release via ANDROID_KEYSTORE_BASE64 + ANDROID_KEYSTORE_PASSWORD + ANDROID_KEY_ALIAS + ANDROID_KEY_PASSWORD secrets
+  * Build summary in $GITHUB_STEP_SUMMARY with install instructions
+- Updated package.json: name=guymatv, version=1.0.0, added scripts: build:mobile, cap:sync, cap:add:android, apk:debug, apk:release, apk:clean
+- Updated .gitignore: mobile/www, android/, *.apk, *.aab, *.keystore, playwright-report/, ios/
+- Created /home/z/my-project/MOBILE.md: full deployment guide (Render/Railway/Fly.io/VPS), GitHub Actions setup, signed release, local build, troubleshooting, Play Store checklist
+- Verified end-to-end with Agent Browser:
+  * Clicked "Lancer le stream" on "La Bataille de Gaulle : L'Âge de fer"
+  * Modal opened, showed "Extraction des lecteurs en cours…" for ~40s (Playwright running)
+  * After extraction: native <video> element appeared, loaded https://v6.vidzy.cc/hls2/.../master.m3u8 via hls.js
+  * Video playing: currentTime=34.6s, duration=6506s (~1h48), videoWidth=867, videoHeight=488, readyState=4, paused=false
+  * ZERO errors in console, ZERO errors in agent-browser errors
+  * Verified mobile build works: GUYMA_MOBILE_BUILD=1 + GUYMA_API_BASE_URL=https://api.guyma.tv → mobile/www/index.html generated with API URL injected (verified via grep)
+  * Verified src/app/api is properly restored after mobile build
+
+Stage Summary:
+- guymaTV now extracts DIRECT video URLs via Playwright (no more iframe-of-the-whole-page):
+  * Playwright launches headless Chromium, navigates to french-stream.net movie page
+  * Blocks 80+ ad/tracker domains at network layer
+  * Removes anti-bot overlay divs (#dontfoid)
+  * Clicks .player-option buttons (Uqload, ViDZY, Dood, Vidoza, etc.) with force:true
+  * Follows each hoster iframe, intercepts network requests for .mp4/.m3u8
+  * Returns StreamServer[] with direct video URLs
+  * Client plays them in native <video> with hls.js (for .m3u8) — full controls, no ads, no popups
+  * Proxy iframe (/api/proxy) kept as fallback if extraction fails
+- APK build pipeline ready via GitHub Actions:
+  * Push tag v1.0.0 → workflow builds debug + release APKs → uploads as artifacts
+  * Manual dispatch from Actions tab (debug/release/both)
+  * Backend deployed separately (Render/Railway/Fly.io/VPS), APK points to it via GUYMA_API_BASE_URL secret
+  * Runtime override via window.__API_BASE_URL__ allows re-pointing APK without rebuild
+- Architecture: Static APK frontend (Capacitor) ←→ Deployed Next.js backend (Playwright + Prisma + scraping) ←→ french-stream.net

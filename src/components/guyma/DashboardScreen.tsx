@@ -3,6 +3,7 @@
 import React, { useState, useRef, useEffect } from "react";
 import { StreamItem, CategoryType, StreamService } from "@/lib/types";
 import { ServicesBar } from "./ServicesBar";
+import { apiUrl } from "@/lib/api-client";
 
 interface DashboardScreenProps {
   onSelectItem: (item: StreamItem) => void;
@@ -75,7 +76,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
     let cancelled = false;
     setFilmsLoading(true);
     setFilmsError(null);
-    fetch("/api/catalog?type=films&page=1")
+    fetch(apiUrl("/api/catalog?type=films&page=1"))
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
@@ -101,7 +102,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
     let cancelled = false;
     setSeriesLoading(true);
     setSeriesError(null);
-    fetch("/api/catalog?type=series&page=1")
+    fetch(apiUrl("/api/catalog?type=series&page=1"))
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();

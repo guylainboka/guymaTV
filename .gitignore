@@ -52,3 +52,18 @@ prompt
 server.log
 # Skills directory
 /skills/
+# guymaTV mobile / APK build artifacts
+/mobile/www/
+/android/
+/android.keystore
+keystore.properties
+*.apk
+*.aab
+*.keystore
+
+# Playwright
+/playwright-report/
+/test-results/
+
+# Capacitor
+/ios/

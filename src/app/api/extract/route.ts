@@ -1,13 +1,13 @@
 /**
- * guymaTV - Servers API
- * GET /api/servers?id=xxx
+ * guymaTV - Video Extraction API
+ * GET /api/extract?id=xxx
  *
- * Returns the available secure player servers for a movie/series.
- * Delegates to the Playwright-based extractor to get DIRECT video URLs
- * (.mp4 / .m3u8) from Uqload/Vidoza/Doodstream/etc.
+ * Launches Playwright to extract direct video URLs from french-stream.net.
+ * Returns an array of StreamServer with direct .mp4/.m3u8 URLs that the
+ * client can play in a native <video> element.
  *
- * The extracted URLs can be played in a native <video> element — no iframe,
- * no ads, no popups. The proxy fallback is always included as last resort.
+ * First call is slow (~10-15s for Playwright launch + page navigation).
+ * Subsequent calls for the same id are cached for 30 minutes.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -26,12 +26,16 @@ export async function GET(req: NextRequest) {
         { status: 400 }
       );
     }
+
     const servers = await extractVideoServers(id);
     return NextResponse.json(servers);
   } catch (err) {
-    console.error("[/api/servers] error:", err);
+    console.error("[/api/extract] error:", err);
     return NextResponse.json(
-      { error: "Failed to fetch servers" },
+      {
+        error: "Failed to extract video URLs",
+        servers: [],
+      },
       { status: 500 }
     );
   }

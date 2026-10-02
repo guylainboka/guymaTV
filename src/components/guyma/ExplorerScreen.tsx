@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from "react";
 import { StreamItem, CategoryType, StreamService } from "@/lib/types";
+import { apiUrl } from "@/lib/api-client";
 
 interface ExplorerScreenProps {
   onSelectItem: (item: StreamItem) => void;
@@ -44,8 +45,8 @@ export const ExplorerScreen: React.FC<ExplorerScreenProps> = ({
     setLoading(true);
     setError(null);
     const url = searchQuery
-      ? `/api/catalog?type=all&page=1&search=${encodeURIComponent(searchQuery)}`
-      : `/api/catalog?type=all&page=1`;
+      ? apiUrl(`/api/catalog?type=all&page=1&search=${encodeURIComponent(searchQuery)}`)
+      : apiUrl("/api/catalog?type=all&page=1");
     fetch(url)
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
